@@ -59,6 +59,16 @@ export function releaseArchiveName(appVersion) {
   return `SnowLuma-Lidure-v${normalizeVersion(appVersion)}-linux-arm64.tar.gz`;
 }
 
+export function pnpmSpawnSpec(args, platform = process.platform) {
+  if (platform === 'win32') {
+    return {
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', 'pnpm.cmd', ...args],
+    };
+  }
+  return { command: 'pnpm', args };
+}
+
 export async function assertRequiredReleaseFiles(rootDir, extraRequired = []) {
   const missing = [];
   for (const relative of [...requiredReleasePaths, ...extraRequired]) {
@@ -91,6 +101,11 @@ function run(command, args, options = {}) {
   });
 }
 
+async function runPnpm(args, options = {}) {
+  const spec = pnpmSpawnSpec(args);
+  return run(spec.command, spec.args, options);
+}
+
 async function downloadFile(url, destination) {
   const response = await fetch(url);
   if (!response.ok || !response.body) {
@@ -117,11 +132,11 @@ export async function main() {
   console.log(`[INFO] Bundled Node.js: v${nodeVersion}`);
 
   await run('tar', ['--version'], { cwd: repoRoot });
-  await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['run', 'build:all'], {
+  await runPnpm(['run', 'build:all'], {
     cwd: repoRoot,
     env: { ...process.env, SNOWLUMA_TARGET: TARGET_TRIPLE },
   });
-  await run(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', ['check:release-layout'], { cwd: repoRoot });
+  await runPnpm(['check:release-layout'], { cwd: repoRoot });
 
   await assertRequiredReleaseFiles(distDir);
   await assertForbiddenReleaseFiles(distDir);
