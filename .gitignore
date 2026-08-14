@@ -16,6 +16,9 @@ dist/
 **/data/
 logs/
 
+# locally generated self-hosted release archives
+release/
+
 # macOS metadata
 .DS_Store
 
