@@ -9,6 +9,7 @@ import {
   nodeArchiveName,
   nodeDownloadUrl,
   normalizeVersion,
+  pnpmSpawnSpec,
   releaseArchiveName,
   stagedNodePath,
 } from './package-linux-arm64.mjs';
@@ -30,6 +31,20 @@ test('resolves the extracted Node binary inside the official archive root', () =
   assert.equal(
     stagedNodePath('/tmp/work', '22.13.0'),
     path.join('/tmp/work', 'node-v22.13.0-linux-arm64', 'bin', 'node'),
+  );
+});
+
+test('uses cmd.exe to launch pnpm on Windows', () => {
+  assert.deepEqual(
+    pnpmSpawnSpec(['run', 'build:all'], 'win32'),
+    { command: 'cmd.exe', args: ['/d', '/s', '/c', 'pnpm.cmd', 'run', 'build:all'] },
+  );
+});
+
+test('launches pnpm directly on non-Windows platforms', () => {
+  assert.deepEqual(
+    pnpmSpawnSpec(['check:release-layout'], 'linux'),
+    { command: 'pnpm', args: ['check:release-layout'] },
   );
 });
 
