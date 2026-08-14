@@ -13,6 +13,9 @@ where node >nul 2>nul || goto :missing_node
 where corepack >nul 2>nul || goto :missing_corepack
 where tar >nul 2>nul || goto :missing_tar
 
+node packages\runtime\check-node-version.cjs
+if errorlevel 1 goto :failed
+
 for /f "delims=" %%V in ('node -p "require('./package.json').packageManager"') do set PACKAGE_MANAGER=%%V
 if /I not "%PACKAGE_MANAGER%"=="pnpm@10.28.0" (
   echo [ERROR] package.json requires pnpm@10.28.0, got %PACKAGE_MANAGER%.
