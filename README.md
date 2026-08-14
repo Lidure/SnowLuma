@@ -78,6 +78,30 @@ pnpm test
 
 贡献流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)；模块边界与项目词汇见 [`CONTEXT.md`](CONTEXT.md)；开发方向见 [`RoadMap.md`](RoadMap.md)。
 
+### 自用 Raspberry Pi 5 / Linux ARM64 打包
+
+`feat/ws-client-group-message-filter` 自用分支额外提供 Windows 本地打包入口 `build_pi_release.bat`。双击后会复用项目现有 `linux-arm64` 构建链路，并把 `.node-version` 指定版本的 Linux ARM64 Node.js 一并放入完整运行包。
+
+生成文件位于本地 `release/` 目录，命名格式为：
+
+```text
+SnowLuma-Lidure-v<version>-linux-arm64.tar.gz
+```
+
+将压缩包复制到 Raspberry Pi 5 后：
+
+```bash
+mkdir -p ~/snowluma
+cd ~/snowluma
+tar -xzf SnowLuma-Lidure-v<version>-linux-arm64.tar.gz
+chmod +x launcher.sh node
+./launcher.sh
+```
+
+然后从局域网浏览器访问 `http://<树莓派IP>:5099`。完整包已经内置 Node.js，树莓派端不需要安装 pnpm 或源码开发依赖。
+
+该打包入口仅用于非商业自托管和私下修改，不会自动创建公开 GitHub Release，也不会把 `config/`、`data/`、日志、源码、Git 历史或本地机器人连接配置打入发行包。
+
 ## 使用边界与许可
 
 > [!IMPORTANT]
