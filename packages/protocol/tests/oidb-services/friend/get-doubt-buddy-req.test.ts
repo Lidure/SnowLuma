@@ -10,7 +10,10 @@ function makeSender(): { sendRawPacket: ReturnType<typeof vi.fn> } {
   const respEnv: OidbBase<OidbDoubtGetResp> = {
     command: 0xD69, subCommand: 0,
     body: { status: 1, body: { list: [
-      { uid: 'u_alice', nick: 'Alice', source: '可能认识', msg: 'hi', reqTime: 1700000000n },
+      {
+        uid: 'u_alice', nick: 'Alice', source: '可能认识', reason: '',
+        msg: 'hi', uin: 12345n, groupCode: '', reqTime: 1700000000n,
+      },
     ], reason: '' } },
   };
   const r: SendPacketResult = {
@@ -46,11 +49,36 @@ describe('GetDoubtBuddyReq namespace', () => {
   it('deserializes the item list to the OneBot shape (uid + reqTime high-confidence)', async () => {
     const list = await GetDoubtBuddyReq.invoke(makeSender(), { count: 10 });
     expect(list).toEqual([
-      { uid: 'u_alice', nick: 'Alice', source: '可能认识', msg: 'hi', reqTime: 1700000000 },
+      {
+        uid: 'u_alice', user_id: 12345, nick: 'Alice', source: '可能认识',
+        reason: '', msg: 'hi', group_code: '', reqTime: 1700000000,
+      },
     ]);
   });
 
   it('deserialize returns [] when the body has no list', () => {
     expect(GetDoubtBuddyReq.deserialize({} as any, { status: 1 })).toEqual([]);
+  });
+
+  it('keeps the uid string and does not reread it as the account number', async () => {
+    const respEnv: OidbBase<OidbDoubtGetResp> = {
+      command: 0xD69, subCommand: 0,
+      body: { status: 1, body: { list: [
+        { uid: 'u_alice', nick: 'Alice', msg: 'hi', source: 'QQ号查找', reason: 'caution' },
+      ] } },
+    };
+    const sender = {
+      sendRawPacket: vi.fn(async () => ({
+        success: true, gotResponse: true, errorCode: 0, errorMessage: '',
+        responseData: Buffer.from(protobuf_encode<OidbBase<OidbDoubtGetResp>>(respEnv)),
+      })),
+    };
+    const list = await GetDoubtBuddyReq.invoke(sender, { count: 10 });
+    expect(list).toEqual([
+      {
+        uid: 'u_alice', user_id: 0, nick: 'Alice', source: 'QQ号查找',
+        reason: 'caution', msg: 'hi', group_code: '', reqTime: 0,
+      },
+    ]);
   });
 });

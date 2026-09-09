@@ -29,7 +29,7 @@ import {
   convertFriendRequest,
   convertGroupInvite,
 } from './to-request';
-import { elementsToJson } from './to-segment';
+export { elementsToOneBotSegments } from './to-segment';
 
 export type ImageUrlResolver = (element: MessageElement, isGroup: boolean) => string | Promise<string>;
 export type MediaUrlResolver = (element: MessageElement, isGroup: boolean, sessionId: number) => Promise<string>;
@@ -71,9 +71,9 @@ type ConverterFor<K extends QQEventVariant['kind']> =
  * new `QQEventVariant` kind that forgets a converter is a compile error here —
  * not a silent `null` at runtime.
  */
-type ConverterRegistry = { [K in QQEventVariant['kind']]: ConverterFor<K> | null };
+export type ConverterRegistry = { [K in QQEventVariant['kind']]: ConverterFor<K> | null };
 
-const CONVERTERS: ConverterRegistry = {
+export const CONVERTERS = {
   // Messages.
   friend_message: convertFriendMessage,
   group_message: convertGroupMessage,
@@ -107,7 +107,7 @@ const CONVERTERS: ConverterRegistry = {
   online_devices_changed: null,
   // Internal-only identity synchronization from another QQ client.
   friend_remark_changed: null,
-};
+} satisfies ConverterRegistry;
 
 export async function convertEvent(
   ctx: ConverterContext,
@@ -120,18 +120,4 @@ export async function convertEvent(
   return (converter as (ctx: ConverterContext, event: QQEventVariant) => JsonObject | Promise<JsonObject>)(ctx, event);
 }
 
-export async function elementsToOneBotSegments(
-  elements: MessageElement[],
-  isGroup: boolean,
-  sessionId: number,
-  imageUrlResolver?: ImageUrlResolver | null,
-  mediaUrlResolver?: MediaUrlResolver | null,
-  messageIdResolver?: MessageIdResolver | null,
-  mediaSegmentSink?: MediaSegmentSink | null,
-  selfId = 0,
-) {
-  return elementsToJson(
-    elements, isGroup, sessionId,
-    imageUrlResolver, mediaUrlResolver, messageIdResolver, mediaSegmentSink, selfId,
-  );
-}
+

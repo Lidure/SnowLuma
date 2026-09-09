@@ -726,6 +726,24 @@
             "type": "integer",
             "minimum": 1
           }
+        },
+        {
+          "name": "button_id",
+          "type": "string",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "callback_data",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "default": ""
         }
       ],
       "invariants": [],
@@ -745,12 +763,21 @@
           "msg_seq": {
             "type": "integer",
             "minimum": 1
+          },
+          "button_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "callback_data": {
+            "type": "string",
+            "default": ""
           }
         },
         "required": [
           "group_id",
           "bot_appid",
-          "msg_seq"
+          "msg_seq",
+          "button_id"
         ],
         "additionalProperties": true
       },
@@ -924,7 +951,8 @@
           "name": "files",
           "type": "raw",
           "required": false,
-          "schema": {}
+          "schema": {},
+          "desc": "路径、{ file, name }，或它们的数组"
         },
         {
           "name": "name",
@@ -947,7 +975,9 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "files": {},
+          "files": {
+            "description": "路径、{ file, name }，或它们的数组"
+          },
           "name": {
             "type": "string"
           },
@@ -1026,6 +1056,7 @@
     {
       "name": "del_group_album_media",
       "aliases": [],
+      "summary": "删除群相册图片或视频",
       "readOnly": false,
       "params": [
         {
@@ -1055,7 +1086,8 @@
           "schema": {
             "type": "string",
             "minLength": 1
-          }
+          },
+          "desc": "图片长定位标识，或视频 id"
         }
       ],
       "invariants": [],
@@ -1074,7 +1106,8 @@
           },
           "lloc": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "description": "图片长定位标识，或视频 id"
           }
         },
         "required": [
@@ -1571,6 +1604,12 @@
             "type": "string"
           },
           "default": ""
+        },
+        {
+          "name": "headers",
+          "type": "raw",
+          "required": false,
+          "schema": {}
         }
       ],
       "invariants": [],
@@ -1588,7 +1627,8 @@
           "name": {
             "type": "string",
             "default": ""
-          }
+          },
+          "headers": {}
         },
         "additionalProperties": true
       },
@@ -2262,13 +2302,15 @@
       "params": [
         {
           "name": "message_id",
-          "type": "string",
-          "required": false,
+          "type": "messageId",
+          "required": true,
+          "role": "message_id",
           "schema": {
-            "type": "string"
-          },
-          "default": "",
-          "role": "message_id"
+            "type": "integer",
+            "not": {
+              "const": 0
+            }
+          }
         }
       ],
       "invariants": [],
@@ -2276,11 +2318,16 @@
         "type": "object",
         "properties": {
           "message_id": {
-            "type": "string",
-            "default": "",
+            "type": "integer",
+            "not": {
+              "const": 0
+            },
             "x-role": "message_id"
           }
         },
+        "required": [
+          "message_id"
+        ],
         "additionalProperties": true
       },
       "category": "扩展"
@@ -3229,6 +3276,10 @@
               "type": "string",
               "description": "申请人 uid（回传作 set_doubt_friends_add_request 的 flag）"
             },
+            "user_id": {
+              "type": "integer",
+              "description": "申请人 QQ 号"
+            },
             "nick": {
               "type": "string",
               "description": "申请人昵称"
@@ -3237,9 +3288,17 @@
               "type": "string",
               "description": "申请来源"
             },
+            "reason": {
+              "type": "string",
+              "description": "附加说明"
+            },
             "msg": {
               "type": "string",
               "description": "验证留言"
+            },
+            "group_code": {
+              "type": "string",
+              "description": "来源群号，无则为空串"
             },
             "reqTime": {
               "type": "integer",
@@ -3248,9 +3307,12 @@
           },
           "required": [
             "uid",
+            "user_id",
             "nick",
             "source",
+            "reason",
             "msg",
+            "group_code",
             "reqTime"
           ]
         }
@@ -3640,6 +3702,14 @@
           "schema": {
             "type": "string"
           }
+        },
+        {
+          "name": "message_id",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "invariants": [],
@@ -3647,6 +3717,9 @@
         "type": "object",
         "properties": {
           "id": {
+            "type": "string"
+          },
+          "message_id": {
             "type": "string"
           }
         },
@@ -3858,6 +3931,116 @@
         "additionalProperties": true
       },
       "category": "扩展"
+    },
+    {
+      "name": "get_group_admin_settings",
+      "aliases": [],
+      "summary": "获取群管理设置的当前值",
+      "returns": "与对应设置接口字段对齐的当前群管理设置。",
+      "returnsSchema": {
+        "type": "object",
+        "properties": {
+          "add_type": {
+            "type": "integer",
+            "description": "加群选项（同 set_group_add_option.add_type）"
+          },
+          "group_question": {
+            "type": "string",
+            "description": "加群问题（同 set_group_add_option.group_question）"
+          },
+          "group_answer": {
+            "type": "string",
+            "description": "加群答案（同 set_group_add_option.group_answer）"
+          },
+          "robot_member_switch": {
+            "type": "integer",
+            "description": "机器人加群开关（同 set_group_robot_add_option）"
+          },
+          "robot_member_examine": {
+            "type": "integer",
+            "description": "机器人加群审核（同 set_group_robot_add_option）"
+          },
+          "member_invite_policy": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "require_approval",
+              "no_approval",
+              "no_approval_under_100"
+            ],
+            "description": "成员邀请策略（同 set_group_member_invite_policy.policy）"
+          },
+          "allow_member_upload_album": {
+            "type": "boolean",
+            "description": "是否允许成员上传相册"
+          },
+          "allow_member_temporary_session": {
+            "type": "boolean",
+            "description": "是否允许成员发起临时会话"
+          },
+          "allow_member_create_group": {
+            "type": "boolean",
+            "description": "是否允许成员创建群聊"
+          },
+          "new_member_history_visible": {
+            "type": "boolean",
+            "description": "新成员是否可查看历史消息"
+          },
+          "no_finger_open": {
+            "type": "integer",
+            "description": "是否关闭群指纹/关键词搜索（0 开 1 关）"
+          },
+          "no_code_finger_open": {
+            "type": "integer",
+            "description": "是否关闭群号搜索（0 开 1 关）"
+          }
+        },
+        "required": [
+          "add_type",
+          "group_question",
+          "group_answer",
+          "robot_member_switch",
+          "robot_member_examine",
+          "member_invite_policy",
+          "allow_member_upload_album",
+          "allow_member_temporary_session",
+          "allow_member_create_group",
+          "new_member_history_visible",
+          "no_finger_open",
+          "no_code_finger_open"
+        ]
+      },
+      "readOnly": true,
+      "params": [
+        {
+          "name": "group_id",
+          "type": "uint",
+          "required": true,
+          "role": "group_id",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "desc": "群号"
+        }
+      ],
+      "invariants": [],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "群号",
+            "x-role": "group_id"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "additionalProperties": true
+      },
+      "category": "群管理"
     },
     {
       "name": "get_group_album_list",
@@ -4635,9 +4818,11 @@
         },
         {
           "name": "type",
-          "type": "raw",
+          "type": "string",
           "required": false,
-          "schema": {}
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "invariants": [],
@@ -4650,7 +4835,9 @@
             "description": "群号",
             "x-role": "group_id"
           },
-          "type": {}
+          "type": {
+            "type": "string"
+          }
         },
         "required": [
           "group_id"
@@ -5183,6 +5370,18 @@
           "card_changeable": {
             "type": "boolean",
             "description": "是否可改名片（占位，恒 true）"
+          },
+          "qidian_master_flag": {
+            "type": "integer",
+            "description": "企点主号标志，0 或 1；普通账号为 0"
+          },
+          "qidian_crew_flag": {
+            "type": "integer",
+            "description": "企点员工标志，0 或 1；普通账号为 0"
+          },
+          "qidian_crew_flag_2": {
+            "type": "integer",
+            "description": "企点保留标志，0 或 1；普通账号为 0"
           }
         },
         "required": [
@@ -5342,6 +5541,18 @@
             "card_changeable": {
               "type": "boolean",
               "description": "是否可改名片（占位，恒 true）"
+            },
+            "qidian_master_flag": {
+              "type": "integer",
+              "description": "企点主号标志，0 或 1；普通账号为 0"
+            },
+            "qidian_crew_flag": {
+              "type": "integer",
+              "description": "企点员工标志，0 或 1；普通账号为 0"
+            },
+            "qidian_crew_flag_2": {
+              "type": "integer",
+              "description": "企点保留标志，0 或 1；普通账号为 0"
             }
           },
           "required": [
@@ -5770,6 +5981,14 @@
               "type": "string",
               "description": "申请人昵称"
             },
+            "invitor_uin": {
+              "type": "integer",
+              "description": "邀请人 QQ 号，无邀请时为 0"
+            },
+            "invitor_nick": {
+              "type": "string",
+              "description": "邀请人昵称"
+            },
             "message": {
               "type": "string",
               "description": "验证留言"
@@ -5789,6 +6008,8 @@
             "request_id",
             "requester_uin",
             "requester_nick",
+            "invitor_uin",
+            "invitor_nick",
             "message",
             "checked",
             "flag"
@@ -5973,11 +6194,90 @@
       "aliases": [],
       "summary": "获取小程序卡片 ark",
       "readOnly": true,
-      "params": [],
+      "params": [
+        {
+          "name": "type",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "desc",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "picUrl",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "pic_url",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "jumpUrl",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "jump_url",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
       "invariants": [],
       "inputSchema": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "desc": {
+            "type": "string"
+          },
+          "picUrl": {
+            "type": "string"
+          },
+          "pic_url": {
+            "type": "string"
+          },
+          "jumpUrl": {
+            "type": "string"
+          },
+          "jump_url": {
+            "type": "string"
+          }
+        },
         "additionalProperties": true
       },
       "category": "扩展"
@@ -6020,6 +6320,91 @@
         "additionalProperties": true
       },
       "category": "消息"
+    },
+    {
+      "name": "get_msg_emoji_likes",
+      "aliases": [],
+      "summary": "获取一条消息的全部表情回应",
+      "returns": "该消息上每个表情回应的编号、数量与用户列表。",
+      "returnsSchema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "emoji_id": {
+              "type": "string",
+              "description": "表情编号"
+            },
+            "emoji_type": {
+              "type": "integer",
+              "description": "表情类型"
+            },
+            "count": {
+              "type": "integer",
+              "description": "回应数量"
+            },
+            "last_reaction_time": {
+              "type": "integer",
+              "description": "最近一次回应时间"
+            },
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "user_id": {
+                    "type": "integer",
+                    "description": "用户 QQ 号"
+                  }
+                },
+                "required": [
+                  "user_id"
+                ]
+              }
+            }
+          },
+          "required": [
+            "emoji_id",
+            "emoji_type",
+            "count",
+            "last_reaction_time",
+            "users"
+          ]
+        }
+      },
+      "readOnly": true,
+      "params": [
+        {
+          "name": "message_id",
+          "type": "messageId",
+          "required": true,
+          "role": "message_id",
+          "schema": {
+            "type": "integer",
+            "not": {
+              "const": 0
+            }
+          }
+        }
+      ],
+      "invariants": [],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message_id": {
+            "type": "integer",
+            "not": {
+              "const": 0
+            },
+            "x-role": "message_id"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "additionalProperties": true
+      },
+      "category": "扩展"
     },
     {
       "name": "get_online_clients",
@@ -6172,7 +6557,7 @@
       "name": "get_profile_like",
       "aliases": [],
       "summary": "获取资料点赞",
-      "returns": "点赞资料：uid、最近点赞时间、收藏（favoriteInfo）与点赞（voteInfo）统计。",
+      "returns": "点赞资料：uid、最近点赞时间、收藏与点赞统计及用户明细。",
       "returnsSchema": {
         "type": "object",
         "properties": {
@@ -6202,7 +6587,94 @@
               },
               "userInfos": {
                 "type": "array",
-                "description": "用户列表（恒空）"
+                "description": "收藏用户列表",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "uid": {
+                      "type": "string",
+                      "description": "用户 uid"
+                    },
+                    "uin": {
+                      "type": "integer",
+                      "description": "用户 QQ 号；资料中没有有效号码时为 0"
+                    },
+                    "src": {
+                      "type": "integer",
+                      "description": "来源类型"
+                    },
+                    "latestTime": {
+                      "type": "integer",
+                      "description": "最近互动时间戳"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "互动次数"
+                    },
+                    "giftCount": {
+                      "type": "integer",
+                      "description": "礼物数量"
+                    },
+                    "customId": {
+                      "type": "integer",
+                      "description": "自定义标识"
+                    },
+                    "lastCharged": {
+                      "type": "integer",
+                      "description": "最近充能时间"
+                    },
+                    "bAvailableCnt": {
+                      "type": "integer",
+                      "description": "可用次数"
+                    },
+                    "bTodayVotedCnt": {
+                      "type": "integer",
+                      "description": "今日已点赞次数"
+                    },
+                    "nick": {
+                      "type": "string",
+                      "description": "昵称"
+                    },
+                    "gender": {
+                      "type": "integer",
+                      "description": "性别"
+                    },
+                    "age": {
+                      "type": "integer",
+                      "description": "年龄"
+                    },
+                    "isFriend": {
+                      "type": "boolean",
+                      "description": "是否为好友"
+                    },
+                    "isvip": {
+                      "type": "boolean",
+                      "description": "是否为会员"
+                    },
+                    "isSvip": {
+                      "type": "boolean",
+                      "description": "是否为超级会员"
+                    }
+                  },
+                  "required": [
+                    "uid",
+                    "uin",
+                    "src",
+                    "latestTime",
+                    "count",
+                    "giftCount",
+                    "customId",
+                    "lastCharged",
+                    "bAvailableCnt",
+                    "bTodayVotedCnt",
+                    "nick",
+                    "gender",
+                    "age",
+                    "isFriend",
+                    "isvip",
+                    "isSvip"
+                  ]
+                }
               }
             }
           },
@@ -6228,7 +6700,94 @@
               },
               "userInfos": {
                 "type": "array",
-                "description": "用户列表（恒空）"
+                "description": "点赞用户列表",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "uid": {
+                      "type": "string",
+                      "description": "用户 uid"
+                    },
+                    "uin": {
+                      "type": "integer",
+                      "description": "用户 QQ 号；资料中没有有效号码时为 0"
+                    },
+                    "src": {
+                      "type": "integer",
+                      "description": "来源类型"
+                    },
+                    "latestTime": {
+                      "type": "integer",
+                      "description": "最近互动时间戳"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "description": "互动次数"
+                    },
+                    "giftCount": {
+                      "type": "integer",
+                      "description": "礼物数量"
+                    },
+                    "customId": {
+                      "type": "integer",
+                      "description": "自定义标识"
+                    },
+                    "lastCharged": {
+                      "type": "integer",
+                      "description": "最近充能时间"
+                    },
+                    "bAvailableCnt": {
+                      "type": "integer",
+                      "description": "可用次数"
+                    },
+                    "bTodayVotedCnt": {
+                      "type": "integer",
+                      "description": "今日已点赞次数"
+                    },
+                    "nick": {
+                      "type": "string",
+                      "description": "昵称"
+                    },
+                    "gender": {
+                      "type": "integer",
+                      "description": "性别"
+                    },
+                    "age": {
+                      "type": "integer",
+                      "description": "年龄"
+                    },
+                    "isFriend": {
+                      "type": "boolean",
+                      "description": "是否为好友"
+                    },
+                    "isvip": {
+                      "type": "boolean",
+                      "description": "是否为会员"
+                    },
+                    "isSvip": {
+                      "type": "boolean",
+                      "description": "是否为超级会员"
+                    }
+                  },
+                  "required": [
+                    "uid",
+                    "uin",
+                    "src",
+                    "latestTime",
+                    "count",
+                    "giftCount",
+                    "customId",
+                    "lastCharged",
+                    "bAvailableCnt",
+                    "bTodayVotedCnt",
+                    "nick",
+                    "gender",
+                    "age",
+                    "isFriend",
+                    "isvip",
+                    "isSvip"
+                  ]
+                }
               }
             }
           }
@@ -7021,7 +7580,7 @@
       "name": "get_stranger_info",
       "aliases": [],
       "summary": "获取陌生人信息",
-      "returns": "用户资料：QQ 号、昵称、好友备注、性别、年龄与个性签名，命中资料时另含等级。",
+      "returns": "用户资料：QQ 号、昵称、好友备注、性别、年龄与个性签名，命中资料时另含等级、企点标志与企业名称。",
       "returnsSchema": {
         "type": "object",
         "properties": {
@@ -7056,6 +7615,47 @@
           "level": {
             "type": "integer",
             "description": "QQ 等级，同 qq_level（仅查到资料时返回）"
+          },
+          "status": {
+            "type": "integer",
+            "description": "在线状态码"
+          },
+          "extStatus": {
+            "type": "integer",
+            "description": "扩展状态码"
+          },
+          "ext_status": {
+            "type": "integer",
+            "description": "扩展状态码（同 extStatus）"
+          },
+          "batteryStatus": {
+            "type": "integer",
+            "description": "电量状态"
+          },
+          "customStatus": {
+            "type": "object",
+            "description": "自定义状态",
+            "nullable": true
+          },
+          "customStatusDescInfo": {
+            "type": "string",
+            "description": "自定义状态说明"
+          },
+          "qidian_master_flag": {
+            "type": "integer",
+            "description": "企点主号标志，0 或 1；普通账号为 0"
+          },
+          "qidian_crew_flag": {
+            "type": "integer",
+            "description": "企点员工标志，0 或 1；普通账号为 0"
+          },
+          "qidian_crew_flag_2": {
+            "type": "integer",
+            "description": "企点保留标志，0 或 1；普通账号为 0"
+          },
+          "qidian_enterprise_name": {
+            "type": "string",
+            "description": "企点企业名称；非企点账号或未获取到时为空字符串"
           }
         },
         "required": [
@@ -8283,6 +8883,62 @@
           "schema": {
             "description": "OneBot message: string | segment[] | object. In segment arrays, text segments whose text field is exactly \"\" are compatibility placeholders and do not count as sendable segments; missing, null, and whitespace-only text remain subject to normal validation."
           }
+        },
+        {
+          "name": "message_type",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "group_id",
+          "type": "int",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        {
+          "name": "user_id",
+          "type": "int",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        {
+          "name": "source",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "summary",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "news",
+          "type": "raw",
+          "required": false,
+          "schema": {}
         }
       ],
       "invariants": [],
@@ -8294,7 +8950,28 @@
           },
           "message": {
             "description": "OneBot message: string | segment[] | object. In segment arrays, text segments whose text field is exactly \"\" are compatibility placeholders and do not count as sendable segments; missing, null, and whitespace-only text remain subject to normal validation."
-          }
+          },
+          "message_type": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "user_id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "news": {}
         },
         "additionalProperties": true
       },
@@ -8452,6 +9129,36 @@
           "schema": {
             "description": "OneBot message: string | segment[] | object. In segment arrays, text segments whose text field is exactly \"\" are compatibility placeholders and do not count as sendable segments; missing, null, and whitespace-only text remain subject to normal validation."
           }
+        },
+        {
+          "name": "source",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "summary",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "news",
+          "type": "raw",
+          "required": false,
+          "schema": {}
         }
       ],
       "invariants": [],
@@ -8469,7 +9176,17 @@
           },
           "message": {
             "description": "OneBot message: string | segment[] | object. In segment arrays, text segments whose text field is exactly \"\" are compatibility placeholders and do not count as sendable segments; missing, null, and whitespace-only text remain subject to normal validation."
-          }
+          },
+          "source": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "news": {}
         },
         "required": [
           "group_id"
@@ -8815,6 +9532,36 @@
           "schema": {
             "description": "OneBot message: string | segment[] | object. In segment arrays, text segments whose text field is exactly \"\" are compatibility placeholders and do not count as sendable segments; missing, null, and whitespace-only text remain subject to normal validation."
           }
+        },
+        {
+          "name": "source",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "summary",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "news",
+          "type": "raw",
+          "required": false,
+          "schema": {}
         }
       ],
       "invariants": [],
@@ -8831,7 +9578,17 @@
           },
           "message": {
             "description": "OneBot message: string | segment[] | object. In segment arrays, text segments whose text field is exactly \"\" are compatibility placeholders and do not count as sendable segments; missing, null, and whitespace-only text remain subject to normal validation."
-          }
+          },
+          "source": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "news": {}
         },
         "required": [
           "user_id"
@@ -9008,6 +9765,120 @@
         "additionalProperties": true
       },
       "category": "空间"
+    },
+    {
+      "name": "send_tuwen_ark",
+      "aliases": [],
+      "summary": "发送图文 Ark 卡片（私聊/群聊）",
+      "returns": "null",
+      "returnsSchema": {
+        "type": "null"
+      },
+      "readOnly": false,
+      "params": [
+        {
+          "name": "user_id",
+          "type": "uint",
+          "required": false,
+          "role": "user_id",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "group_id",
+          "type": "uint",
+          "required": false,
+          "role": "group_id",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "desc",
+          "type": "string",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "summary",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "default": "[分享]"
+        },
+        {
+          "name": "preview_url",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "default": "https://tangram-1251316161.file.myqcloud.com/files/20210721/e50a8e37e08f29bf1ffc7466e1950690.png"
+        },
+        {
+          "name": "jump_url",
+          "type": "string",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "invariants": [],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "integer",
+            "minimum": 1,
+            "x-role": "user_id"
+          },
+          "group_id": {
+            "type": "integer",
+            "minimum": 1,
+            "x-role": "group_id"
+          },
+          "title": {
+            "type": "string"
+          },
+          "desc": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string",
+            "default": "[分享]"
+          },
+          "preview_url": {
+            "type": "string",
+            "default": "https://tangram-1251316161.file.myqcloud.com/files/20210721/e50a8e37e08f29bf1ffc7466e1950690.png"
+          },
+          "jump_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "desc",
+          "jump_url"
+        ],
+        "additionalProperties": true
+      },
+      "category": "扩展"
     },
     {
       "name": "set_diy_online_status",
@@ -9340,6 +10211,22 @@
             "minimum": 0
           },
           "default": 0
+        },
+        {
+          "name": "group_question",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "group_answer",
+          "type": "string",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "invariants": [],
@@ -9356,6 +10243,12 @@
             "type": "integer",
             "minimum": 0,
             "default": 0
+          },
+          "group_question": {
+            "type": "string"
+          },
+          "group_answer": {
+            "type": "string"
           }
         },
         "required": [
@@ -9382,15 +10275,19 @@
         },
         {
           "name": "sub_type",
-          "type": "raw",
+          "type": "string",
           "required": false,
-          "schema": {}
+          "schema": {
+            "type": "string"
+          }
         },
         {
           "name": "type",
-          "type": "raw",
+          "type": "string",
           "required": false,
-          "schema": {}
+          "schema": {
+            "type": "string"
+          }
         },
         {
           "name": "approve",
@@ -9419,8 +10316,12 @@
             "type": "string",
             "minLength": 1
           },
-          "sub_type": {},
-          "type": {},
+          "sub_type": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
           "approve": {
             "type": "boolean",
             "default": true
@@ -9987,7 +10888,7 @@
     {
       "name": "set_group_member_permissions",
       "aliases": [],
-      "summary": "设置群成员权限",
+      "summary": "设置群成员权限（仅群主可改）",
       "readOnly": false,
       "params": [
         {
@@ -10897,6 +11798,17 @@
           "schema": {
             "type": "string"
           }
+        },
+        {
+          "name": "sex",
+          "type": "int",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "desc": "0 未知，1 男，2 女"
         }
       ],
       "invariants": [],
@@ -10908,6 +11820,12 @@
           },
           "personal_note": {
             "type": "string"
+          },
+          "sex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2,
+            "description": "0 未知，1 男，2 女"
           }
         },
         "additionalProperties": true
@@ -11074,23 +11992,31 @@
       "params": [
         {
           "name": "longNick",
-          "type": "raw",
+          "type": "string",
           "required": false,
-          "schema": {}
+          "schema": {
+            "type": "string"
+          }
         },
         {
           "name": "long_nick",
-          "type": "raw",
+          "type": "string",
           "required": false,
-          "schema": {}
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "invariants": [],
       "inputSchema": {
         "type": "object",
         "properties": {
-          "longNick": {},
-          "long_nick": {}
+          "longNick": {
+            "type": "string"
+          },
+          "long_nick": {
+            "type": "string"
+          }
         },
         "additionalProperties": true
       },
@@ -11315,17 +12241,30 @@
       "params": [
         {
           "name": "words",
-          "type": "raw",
-          "required": false,
-          "schema": {}
+          "type": "string[]",
+          "required": true,
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       ],
       "invariants": [],
       "inputSchema": {
         "type": "object",
         "properties": {
-          "words": {}
+          "words": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
+        "required": [
+          "words"
+        ],
         "additionalProperties": true
       },
       "category": "扩展"
@@ -11404,7 +12343,7 @@
       "name": "upload_file_stream",
       "aliases": [],
       "summary": "以流式分块方式上传文件到机器人本地(返回可用于发送的本地路径)",
-      "returns": "流式帧:分块确认 type=stream、完成 type=response(含 file_path/file_size/sha256)",
+      "returns": "流式帧:分块确认 type=stream、完成 type=response(含 file_path/file_name/file_size/sha256)",
       "readOnly": false,
       "params": [
         {
@@ -11963,7 +12902,7 @@
     },
     {
       "category": "群管理",
-      "count": 17
+      "count": 18
     },
     {
       "category": "群文件",
@@ -11975,7 +12914,7 @@
     },
     {
       "category": "扩展",
-      "count": 113
+      "count": 115
     },
     {
       "category": "群相册",

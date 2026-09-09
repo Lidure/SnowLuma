@@ -1,5 +1,9 @@
 import { FetchDownloadRkeys } from '@snowluma/protocol/oidb-services/contacts/fetch-download-rkeys';
-import { FetchFriendListPage } from '@snowluma/protocol/oidb-services/contacts/fetch-friend-list-page';
+import {
+  FetchFriendListPage,
+  type FriendListPageCategory,
+  type FriendListPageEntry,
+} from '@snowluma/protocol/oidb-services/contacts/fetch-friend-list-page';
 import { FetchGroupDetail } from '@snowluma/protocol/oidb-services/contacts/fetch-group-detail';
 import { FetchGroupList } from '@snowluma/protocol/oidb-services/contacts/fetch-group-list';
 import { FetchGroupMemberListPage } from '@snowluma/protocol/oidb-services/contacts/fetch-group-member-list-page';
@@ -15,8 +19,13 @@ import {
 } from '@snowluma/protocol/oidb-services/contacts/fetch-robot-uin-ranges';
 import { FetchUserProfile } from '@snowluma/protocol/oidb-services/contacts/fetch-user-profile';
 import { FetchUserProfileByUid } from '@snowluma/protocol/oidb-services/contacts/fetch-user-profile-by-uid';
+import {
+  fetchQidianCorpInfo as fetchQidianCorpInfoWire,
+  type QidianCorpInfo,
+} from '@snowluma/protocol/services/qidian/fetch-corp-info';
 import { GetBuddyRecommendArk } from '@snowluma/protocol/oidb-services/contacts/get-buddy-recommend-ark';
 import { GetGroupRecommendArk } from '@snowluma/protocol/oidb-services/contacts/get-group-recommend-ark';
+import { SendTuwenArk, type SendTuwenArkParams } from '@snowluma/protocol/oidb-services/contacts/send-tuwen-ark';
 import { SetFriendCategory } from '@snowluma/protocol/oidb-services/contacts/set-friend-category';
 import { toHex } from '@snowluma/common/hex';
 import { createLogger } from '@snowluma/common/logger';
@@ -34,60 +43,22 @@ import type { BridgeContext } from '../bridge-context';
 
 const log = createLogger('Bridge.Contacts');
 
-// ─── Helpers (previously in bridge-contacts.ts) ───────────────────
-
-type FriendPropertySource = {
-  additional?: Array<{
-    type?: number;
-    layer1?: {
-      properties?: Array<{
-        code?: number;
-        value?: string;
-      }>;
-    };
-  }>;
-};
-
-interface FriendRosterEntry {
-  friend: FriendInfo;
-  categoryId: number;
-}
-
-interface FriendCategoryMeta {
-  categoryId: number;
-  categoryName: string;
-  memberCount: number;
-  sortId: number;
+// Official client stores group mute as an expire timestamp (internal 60027 /
+// JS groupShutupExpireTime): 0 = off, 0xFFFFFFFF = permanent, otherwise unix
+// seconds. `> 0` is wrong — a leftover past expire still looks "on".
+function isGroupAllMuted(expireTs?: number, nowSec = Math.floor(Date.now() / 1000)): boolean {
+  return (expireTs ?? 0) > nowSec;
 }
 
 interface FriendRoster {
-  entries: FriendRosterEntry[];
-  categories: FriendCategoryMeta[];
+  entries: FriendListPageEntry[];
+  categories: FriendListPageCategory[];
 }
 
 export interface SetFriendCategoryParams {
   uin: number;
   categoryId?: number;
   categoryName?: string;
-}
-
-export function buildFriendProperties(raw: FriendPropertySource): Map<number, string> {
-  const props = new Map<number, string>();
-  for (const additional of raw.additional ?? []) {
-    if ((additional.type ?? 0) !== 1 || !additional.layer1) continue;
-    for (const property of additional.layer1.properties ?? []) {
-      props.set(property.code ?? 0, property.value ?? '');
-    }
-  }
-  return props;
-}
-
-export function permissionToRole(permission: number): string {
-  switch (permission) {
-    case 1: return 'owner';
-    case 2: return 'admin';
-    default: return 'member';
-  }
 }
 
 export function isRobotUin(uin: number, ranges: readonly RobotUinRange[]): boolean {
@@ -127,6 +98,9 @@ export class ContactsApi {
       load: (groupId) => this.fetchGroupMemberListUncached(groupId),
     });
   private robotUinRangesPromise_: Promise<RobotUinRangeSnapshot> | null = null;
+  /** groupUin → approval msgseq from a private qun.invite card. Written
+   *  only by IncomingPacketPipeline (and tests). OneBot reads get/find. */
+  private readonly groupInviteCardSeqs_ = new Map<number, number>();
 
   constructor(private readonly ctx: BridgeContext) { }
 
@@ -168,37 +142,25 @@ export class ContactsApi {
     return GetGroupRecommendArk.invoke(this.ctx, { groupId });
   }
 
+  /** Send a custom 图文 ark card to a C2C peer or group (0xdc2_34). */
+  sendTuwenArk(params: SendTuwenArkParams): Promise<void> {
+    return SendTuwenArk.invoke(this.ctx, params);
+  }
+
   private async fetchFriendRoster(): Promise<FriendRoster> {
-    const entries: FriendRosterEntry[] = [];
-    const categories = new Map<number, FriendCategoryMeta>();
+    const entries: FriendListPageEntry[] = [];
+    const categories = new Map<number, FriendListPageCategory>();
     const seenCookies = new Set<string>();
     let cookie: Uint8Array | undefined;
 
     for (;;) {
-      const resp = await FetchFriendListPage.invoke(this.ctx, { cookie });
-      for (const raw of resp.friends ?? []) {
-        const props = buildFriendProperties(raw);
-        entries.push({
-          categoryId: raw.customGroup ?? 0,
-          friend: {
-            uin: raw.uin ?? 0,
-            uid: raw.uid ?? '',
-            nickname: props.get(20002) ?? String(raw.uin ?? 0),
-            remark: props.get(103) ?? '',
-          },
-        });
-      }
-      for (const raw of resp.categories ?? []) {
-        const categoryId = raw.categoryId ?? 0;
-        categories.set(categoryId, {
-          categoryId,
-          categoryName: raw.categoryName ?? '',
-          memberCount: raw.memberCount ?? 0,
-          sortId: raw.sortId ?? 0,
-        });
+      const page = await FetchFriendListPage.invoke(this.ctx, { cookie });
+      entries.push(...page.entries);
+      for (const category of page.categories) {
+        categories.set(category.categoryId, category);
       }
 
-      const next = resp.cookie;
+      const next = page.cookie;
       if (!next?.length) break;
       const key = toHex(next);
       if (seenCookies.has(key)) {
@@ -310,7 +272,7 @@ export class ContactsApi {
         // is not in the list (0x88D_0 detail only), so it stays undefined here.
         createTime: raw.info?.createdTime ?? 0,
         memo: raw.info?.announcement || raw.info?.description || '',
-        allMuted: (raw.info?.shutUpAllTimestamp ?? 0) > 0,
+        allMuted: isGroupAllMuted(raw.info?.shutUpAllTimestamp),
       });
     }
     this.ctx.identity.rememberGroups(groups);
@@ -341,7 +303,7 @@ export class ContactsApi {
       createTime: Number(r.createTime ?? 0n),
       level: Number(r.level ?? 0n),
       memo: r.noticePreview ?? '',
-      allMuted: (r.shutUpAllTimestamp ?? 0) > 0,
+      allMuted: isGroupAllMuted(r.shutUpAllTimestamp),
     };
   }
 
@@ -360,23 +322,9 @@ export class ContactsApi {
     const members: GroupMemberInfo[] = [];
     let token = '';
     do {
-      const resp = await FetchGroupMemberListPage.invoke(this.ctx, { groupId, token });
-      for (const raw of resp.members ?? []) {
-        members.push({
-          uin: raw.uin?.uin ?? 0,
-          uid: raw.uin?.uid ?? '',
-          nickname: raw.memberName ?? '',
-          card: raw.memberCard?.memberCard ?? '',
-          isRobot: false,
-          role: permissionToRole(raw.permission ?? 0),
-          level: raw.level?.level ?? 0,
-          title: raw.specialTitle ?? '',
-          joinTime: raw.joinTimestamp ?? 0,
-          lastSentTime: raw.lastMsgTimestamp ?? 0,
-          shutUpTime: raw.shutUpTimestamp ?? 0,
-        });
-      }
-      token = resp.token ?? '';
+      const page = await FetchGroupMemberListPage.invoke(this.ctx, { groupId, token });
+      members.push(...page.members);
+      token = page.token;
     } while (token);
 
     const robotSnapshot = await robotSnapshotPromise;
@@ -404,6 +352,12 @@ export class ContactsApi {
     return info;
   }
 
+  /** 企点企业资料卡（#404 后续 PR）。仅在判断命中的是企点账号后再调用。
+   *  best-effort：非企点账号或拉取失败返回 null，不影响上层资料读取。 */
+  async fetchQidianCorpInfo(uin: number): Promise<QidianCorpInfo | null> {
+    return fetchQidianCorpInfoWire(this.ctx, uin);
+  }
+
   async fetchGroupRequests(
     filtered = false,
     count = 50,
@@ -416,6 +370,18 @@ export class ContactsApi {
       const targetUin = raw.target?.uin ?? 0;
       const invitorUin = raw.invitor?.uin ?? 0;
       const operatorUin = raw.operatorUser?.uin ?? 0;
+      const targetUid = raw.target?.uid
+        || this.ctx.identity.findUidByUin(targetUin, groupId)
+        || this.ctx.identity.findUidByUin(targetUin)
+        || '';
+      const invitorUid = raw.invitor?.uid
+        || this.ctx.identity.findUidByUin(invitorUin, groupId)
+        || this.ctx.identity.findUidByUin(invitorUin)
+        || '';
+      const operatorUid = raw.operatorUser?.uid
+        || this.ctx.identity.findUidByUin(operatorUin, groupId)
+        || this.ctx.identity.findUidByUin(operatorUin)
+        || '';
       const notifyType = raw.eventType ?? 0;
       const operationType = groupRequestOperationType(notifyType);
       const sequence = normalizeGroupRequestSequence(raw.sequence, groupId);
@@ -430,20 +396,23 @@ export class ContactsApi {
       requests.push({
         groupId,
         groupName: raw.group?.groupName ?? '',
-        targetUid: this.ctx.identity.findUidByUin(targetUin, groupId)
-          ?? this.ctx.identity.findUidByUin(targetUin)
-          ?? '',
-        targetUin,
+        targetUid,
+        targetUin: targetUin
+          || this.ctx.identity.findUinByUid(targetUid, groupId)
+          || this.ctx.identity.findUinByUid(targetUid)
+          || 0,
         targetName: raw.target?.name ?? '',
-        invitorUid: this.ctx.identity.findUidByUin(invitorUin, groupId)
-          ?? this.ctx.identity.findUidByUin(invitorUin)
-          ?? '',
-        invitorUin,
+        invitorUid,
+        invitorUin: invitorUin
+          || this.ctx.identity.findUinByUid(invitorUid, groupId)
+          || this.ctx.identity.findUinByUid(invitorUid)
+          || 0,
         invitorName: raw.invitor?.name ?? '',
-        operatorUid: this.ctx.identity.findUidByUin(operatorUin, groupId)
-          ?? this.ctx.identity.findUidByUin(operatorUin)
-          ?? '',
-        operatorUin,
+        operatorUid,
+        operatorUin: operatorUin
+          || this.ctx.identity.findUinByUid(operatorUid, groupId)
+          || this.ctx.identity.findUinByUid(operatorUid)
+          || 0,
         operatorName: raw.operatorUser?.name ?? '',
         sequence,
         state: raw.state ?? 0,
@@ -451,6 +420,9 @@ export class ContactsApi {
         eventType: operationType ?? 0,
         comment: raw.comment ?? '',
         filtered,
+        operateTransInfo: raw.operateTransInfo && raw.operateTransInfo.length > 0
+          ? raw.operateTransInfo
+          : undefined,
       });
     }
     this.ctx.identity.rememberGroupRequests(requests);
@@ -507,23 +479,34 @@ export class ContactsApi {
         eventType: operationType ?? 0,
         comment: raw.comment ?? '',
         filtered,
+        operateTransInfo: raw.operateTransInfo && raw.operateTransInfo.length > 0
+          ? raw.operateTransInfo
+          : undefined,
       });
     }
     this.ctx.identity.rememberGroupRequests(requests);
     return requests;
   }
 
+  /** Live observation write. IncomingPacketPipeline and tests only. */
+  rememberGroupInviteCardSequence(groupUin: number, sequence: number): void {
+    if (groupUin > 0 && sequence > 0) this.groupInviteCardSeqs_.set(groupUin, sequence);
+  }
+
   /** The approval msgseq captured from a private "qun.invite" card for this
    *  group, or undefined if none was seen. `set_group_add_request` uses it to
    *  approve a bot self-invite via 0x10c8 (eventType=2). See issue #125. */
   getGroupInviteCardSequence(groupId: number): number | undefined {
-    return this.ctx.identity.getGroupInviteCardSequence(groupId);
+    return this.groupInviteCardSeqs_.get(groupId);
   }
 
   /** Resolve the group for a private invite-card msgseq. Numeric OneBot flags
    *  use this path because the card sequence is absent from 0x10C0. */
   findGroupInviteCardGroupBySequence(sequence: number): number | undefined {
-    return this.ctx.identity.findGroupInviteCardGroupBySequence(sequence);
+    for (const [groupUin, rememberedSequence] of this.groupInviteCardSeqs_) {
+      if (rememberedSequence === sequence) return groupUin;
+    }
+    return undefined;
   }
 
   async fetchDownloadRKeys(): Promise<DownloadRKeyInfo[]> {

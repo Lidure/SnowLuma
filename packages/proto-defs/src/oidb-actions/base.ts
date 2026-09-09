@@ -25,6 +25,10 @@ export interface OidbMuteAll {
 }
 export interface Oidb0x89a_0AddOptionSettings {
   addType?: pb<16, uint_32>;
+  // EncodeModifyGroupDetailInfoParam: question=30/60224, answer=31/60225.
+  // Empty string is a real write (clears the other mode), so these are optional.
+  groupQuestion?: pb_optional<30, string>;
+  groupAnswer?:   pb_optional<31, string>;
 }
 export interface Oidb0x89a_0AddOption {
   groupUin?: pb<1, uint_64>;
@@ -84,6 +88,7 @@ export interface Oidb0x89a_0HistoryVisibility {
 }
 // 0x89A_0 — one masked group-member capability update. These are deny bits,
 // so callers clear the selected bit to allow a capability and set it to deny.
+// Same settings tags as invite policy.
 export interface Oidb0x89a_0MemberPermissionSettings {
   appPrivilegeFlag?: pb_optional<23, uint_32>;
   appPrivilegeMask?: pb_optional<24, uint_32>;
@@ -99,13 +104,16 @@ export interface OidbKickMember {
   rejectAddRequest?: pb<4, bool>;
   reason?:           pb<5, string>;
 }
-// 0x8A0_1 response body. Cross-checked against Lagrange.Core's
-// OidbSvcTrpcTcp0x8A0_1Response and the current QQ kick result contract:
-// transport/envelope success does not imply the member was removed; a
-// command-level refusal is returned in errorMsg.
+// 0x8A0_1 response body. Envelope errorCode=0 is not enough: each target
+// is listed in `results`. result=0 (or omitted) means that member was
+// removed; any other value is a refusal for that member.
+export interface OidbKickMemberResult {
+  result?: pb<1, uint_32>;
+  uid?:    pb<2, string>;
+}
 export interface OidbKickMemberResponse {
   groupUin?: pb<1, uint_32>;
-  errorMsg?: pb<2, string>;
+  results?:  pb_repeated<2, OidbKickMemberResult>;
 }
 export interface OidbLeaveGroup {
   groupUin?: pb<1, uint_32>;
@@ -139,10 +147,13 @@ export interface OidbDeleteFriend {
   field1?: pb<1, OidbDeleteFriendField1>;
 }
 export interface OidbGroupRequestBody {
-  sequence?:  pb<1, uint_64>;
-  eventType?: pb<2, uint_32>;
-  groupUin?:  pb<3, uint_32>;
-  message?:   pb<4, string>;
+  sequence?:         pb<1, uint_64>;
+  eventType?:        pb<2, uint_32>;
+  groupUin?:         pb<3, uint_32>;
+  // Encoder always writes this field. An omitted empty string is not the
+  // same as a present empty/space value; callers must set it.
+  message?:          pb_optional<4, string>;
+  operateTransInfo?: pb<7, bytes>;
 }
 export interface OidbGroupRequestAction {
   accept?: pb<1, uint_32>;
@@ -258,6 +269,10 @@ export interface OidbUserInfoResponse {
 export interface AvatarInfo {
   url?: pb<5, string>;
 }
+export interface OidbCustomStatus {
+  faceId?: pb<1, uint_32>;
+  msg?:    pb<2, string>;
+}
 export interface OidbFriendListNumber {
   numbers?: pb_repeated<1, uint_32>;
 }
@@ -343,20 +358,28 @@ export interface OidbGroupDetailFlags {
   createTime?:      pb<2, bool>;
   maxMemberCount?:  pb<5, bool>;
   memberCount?:     pb<6, bool>;
+  addType?:         pb<7, bool>;
   level?:           pb<10, bool>;
   name?:            pb<15, string>;
   noticePreview?:   pb<16, string>;
   uin?:             pb<21, bool>;
   lastSequence?:    pb<22, bool>;
   lastMessageTime?: pb<23, bool>;
-  question?:        pb<24, bool>;
-  answer?:          pb<25, string>;
+  // EncodeSingleGroupInfoParamByBaseFilter writes these as empty strings
+  // (length-delimited). A bool true is a different wire type and the
+  // server ignores it; a plain pb<> empty string is omitted.
+  question?:        pb_optional<24, string>;
+  answer?:          pb_optional<25, string>;
   maxAdminCount?:   pb<29, string>;
-  shutUpAllTimestamp?: pb<59, bool>;
-  /** Current complete app privilege bitfield; needed for masked mutations. */
-  privilegeFlag?:   pb<99, bool>;
-  /** Current complete groupFlagExt4 bitfield; needed for masked mutations. */
+  // Official request mask for group shutup expire (proto tag 45 → 60027).
+  // Lagrange's tag 59 requests 60259, which is a different field.
+  shutUpAllTimestamp?: pb<45, bool>;
+  /** Request the complete app privilege bitfield. */
+  privilegeFlag?:   pb<56, bool>;
+  /** Request the new-member history-visible switch. */
   groupFlagExt4?:   pb<101, bool>;
+  noFingerOpen?:     pb<82, bool>;
+  noCodeFingerOpen?: pb<83, bool>;
 }
 export interface OidbGroupDetailConfig {
   uin?:   pb<1, uint_64>;
@@ -539,28 +562,55 @@ export interface OidbSetProfile {
   stringProfiles?: pb_repeated<2, OidbProfileStringItem>;
   intProfiles?:    pb_repeated<3, OidbProfileIntItem>;
 }
-export interface Oidb0x7edInteraction {
+export interface Oidb0x7edUserInfo {
+  uid?:                pb<1, string>;
+  src?:                pb<2, uint_32>;
+  latestTime?:         pb<3, uint_32>;
+  count?:              pb<4, uint_32>;
+  giftCount?:          pb<5, uint_32>;
+  customId?:           pb<6, uint_32>;
+  lastCharged?:        pb<8, uint_32>;
+  availableCount?:     pb<21, uint_32>;
+  todayVotedCount?:    pb<22, uint_32>;
+  nick?:               pb<101, string>;
+  gender?:             pb<102, uint_32>;
+  age?:                pb<103, uint_32>;
+  isFriend?:           pb<104, bool>;
+  isVip?:              pb<105, bool>;
+  isSvip?:             pb<106, bool>;
+}
+export interface Oidb0x7edFavoriteInfo {
   totalCount?: pb<1, uint_32>;
-  newCount?:   pb<2, uint_32>;
+  lastTime?:   pb<2, uint_32>;
   todayCount?: pb<3, uint_32>;
-  lastTime?:   pb<4, uint_64>;
+  userInfos?:  pb_repeated<4, Oidb0x7edUserInfo>;
+}
+export interface Oidb0x7edVoteInfo {
+  totalCount?:      pb<1, uint_32>;
+  newCount?:        pb<2, uint_32>;
+  newNearbyCount?:  pb<3, uint_32>;
+  lastVisitTime?:   pb<4, uint_32>;
+  userInfos?:       pb_repeated<5, Oidb0x7edUserInfo>;
 }
 export interface Oidb0x7edUserLikeInfo {
   uid?:          pb<1, string>;
-  time?:         pb<2, uint_64>;
-  favoriteInfo?: pb<3, Oidb0x7edInteraction>;
-  voteInfo?:     pb<4, Oidb0x7edInteraction>;
+  time?:         pb<2, uint_32>;
+  favoriteInfo?: pb<3, Oidb0x7edFavoriteInfo>;
+  voteInfo?:     pb<4, Oidb0x7edVoteInfo>;
 }
 export interface Oidb0x7edReq {
-  targetUid?: pb<1, string>;
-  basic?:     pb<2, uint_32>;
-  vote?:      pb<3, uint_32>;
-  favorite?:  pb<4, uint_32>;
-  start?:     pb<12, uint_32>;
-  limit?:     pb<103, uint_32>;
+  targetUids?: pb_repeated<1, string>;
+  basic?:      pb<2, uint_32>;
+  vote?:       pb<3, uint_32>;
+  favorite?:   pb<4, uint_32>;
+  userProfile?: pb<101, uint_32>;
+  start?:      pb<102, uint_32>;
+  limit?:      pb<103, uint_32>;
 }
 export interface Oidb0x7edResp {
   userLikeInfos?: pb_repeated<1, Oidb0x7edUserLikeInfo>;
+  friendMaxVotes?: pb<2, uint_32>;
+  start?:          pb<101, int_32>;
 }
 export interface Oidb0x8a7Req {
   basic1?:  pb<1, uint_32>;
@@ -858,46 +908,33 @@ export interface FaceroamOpResp {
   field3?:  pb<3, uint_32>;
   item?:    pb<4, FaceroamOpRespItem>;
 }
-// 0x9083_1: fetch emoji-like user list. Field numbers must mirror the
-// sibling 0x9082 reaction Req (OidbGroupReaction): field 4 = emoji_id
-// (string), field 5 = emoji_type (uint). The pre-fix definition had
-// these two swapped, which silently dropped both fields on the server
-// side (wire type mismatch → protobuf decoder discards) and made every
-// call return an empty list with no error. Cross-checked against
-// Lagrange.Core V2 `Internal/Packets/Service/SetGroupReaction.cs`.
+// 0x9083_1: fetch emoji-like user list for one emoji on a group message.
+// Request/response tags follow Windows QQ EncodeGetMsgEmojiLikesListReq /
+// DecodeGetMsgEmojiLikesListRsp. This is not the 0x9082 set-reaction body.
 export interface Oidb0x9083Req {
   groupId?:   pb<2, uint_64>;
-  // ulong on LagrangeV2's `SetGroupReactionRequest`. wire-compatible
-  // with uint_32 for small seq values (which is what message sequences
-  // actually are today), but match the spec to be safe — costs nothing.
   sequence?:  pb<3, uint_64>;
-  emojiId?:   pb<4, string>;
-  emojiType?: pb<5, uint_32>;
-  cookie?:    pb<6, bytes>;
+  emojiType?: pb<4, uint_32>;
+  emojiId?:   pb<5, string>;
+  cookie?:    pb<6, string>;
   field7?:    pb<7, uint_32>;
   count?:     pb<8, uint_32>;
-  field12?:   pb<12, uint_32>;
 }
-export interface Oidb0x9083RespUserInfo {
-  uin?:    pb<1, uint_64>;
-  field3?: pb<3, uint_32>;
-}
-export interface Oidb0x9083RespInner {
-  // The server returns one entry per liker — must be repeated. A single
-  // field collapses N wire entries into "last writer wins", so groups
-  // with multiple likers used to come back as a single user (or empty
-  // if the wire layout shifted).
-  userInfo?: pb_repeated<1, Oidb0x9083RespUserInfo>;
-  field4?:   pb<4, uint_32>;
+export interface Oidb0x9083RespUser {
+  uin?:     pb<1, uint_64>;
+  nick?:    pb<2, string>;
+  headUrl?: pb<3, string>;
 }
 export interface Oidb0x9083Resp {
-  inner?:  pb<4, Oidb0x9083RespInner>;
-  cookie?: pb<5, bytes>;
+  users?:   pb_repeated<1, Oidb0x9083RespUser>;
+  cookie?:  pb<2, string>;
+  isLast?:  pb<3, bool>;
+  isFirst?: pb<4, bool>;
 }
 
-// 0x9084_1: fetch reaction summary on a message. Returns one entry per
-// emoji used + an "available reactions" catalog tail. Schema decoded
-// from production wire dump:
+// 0x9084_1: recent-used emoji catalog (GetRecentUseEmojiListForC2CAndGroup).
+// Not the per-message reaction list (that is 0x9083_1). Schema from a
+// production dump of the catalog body:
 //   { 08 0A          ← top-level field 1 (uint, meaning unclear: maybe
 //                       "total reactions on msg" or a flag — empirically
 //                       constant across messages)

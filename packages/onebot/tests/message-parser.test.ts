@@ -3,7 +3,11 @@ import os from 'os';
 import path from 'path';
 import { describe, it, expect, vi } from 'vitest';
 import { protobuf_decode, protobuf_encode } from '@snowluma/proton';
-import { MessageElementValidationError, parseMessage } from '../src/message-parser';
+import {
+  exclusiveForwardNodeList,
+  MessageElementValidationError,
+  parseMessage,
+} from '../src/message-parser';
 import { buildSendElems } from '@snowluma/protocol/element-builder';
 import type { MentionExtraSend } from '@snowluma/proto-defs/action';
 import type { MarketFacePbReserve } from '@snowluma/proto-defs/element';
@@ -89,6 +93,20 @@ describe('parseMessage', () => {
         false,
       );
       expect(result).toEqual([{ type: 'text', text: 'hello' }]);
+    });
+
+    it('rejects a node mixed into a normal message', async () => {
+      await expect(parseMessage(
+        [
+          { type: 'text', data: { text: 'hi' } },
+          { type: 'node', data: { user_id: 1, content: [{ type: 'text', data: { text: 'x' } }] } },
+        ] as any,
+        false,
+      )).rejects.toMatchObject({
+        code: 'UNSENDABLE_TYPE',
+        elementType: 'node',
+        message: 'message segment "node" is only valid inside a forward node list',
+      });
     });
 
     it('ignores explicit empty text placeholders between sendable segments (issue #273)', async () => {
@@ -666,6 +684,33 @@ describe('parseMessage', () => {
       expect(result[0].replySeq).toBe(100);
     });
 
+    it('resolves a signed-int32 message_id to the stored reply sequence (#371)', async () => {
+      const result = await parseMessage(
+        [
+          { type: 'reply', data: { id: -188861750 } },
+          { type: 'text', data: { text: '测试成功' } },
+        ] as any,
+        false,
+        { resolveReplySequence: (id) => id === -188861750 ? 4242 : null },
+      );
+      expect(result).toEqual([
+        { type: 'reply', replySeq: 4242, replyMessageId: -188861750 },
+        { type: 'text', text: '测试成功' },
+      ]);
+    });
+
+    it('does not treat an unresolved negative message_id as a QQ sequence (#371)', async () => {
+      const result = await parseMessage(
+        [
+          { type: 'reply', data: { id: -188861750 } },
+          { type: 'text', data: { text: '测试成功' } },
+        ] as any,
+        false,
+        { resolveReplySequence: () => null },
+      );
+      expect(result).toEqual([{ type: 'text', text: '测试成功' }]);
+    });
+
     it('parses share as json card', async () => {
       const result = await parseMessage(
         [{ type: 'share', data: { url: 'https://example.com', title: 'Test' } }] as any,
@@ -839,6 +884,34 @@ describe('parseMessage', () => {
       } finally {
         vi.unstubAllGlobals();
       }
+    });
+  });
+
+  describe('exclusiveForwardNodeList', () => {
+    const node = {
+      type: 'node',
+      data: { user_id: 1, content: [{ type: 'text', data: { text: 'x' } }] },
+    };
+
+    it('accepts a node array and a single node object', () => {
+      expect(exclusiveForwardNodeList([node], false)).toEqual([node]);
+      expect(exclusiveForwardNodeList(node, false)).toEqual([node]);
+    });
+
+    it('strips explicit empty text placeholders around nodes', () => {
+      expect(exclusiveForwardNodeList([
+        { type: 'text', data: { text: '' } },
+        node,
+        { type: 'text', data: { text: '' } },
+      ], false)).toEqual([node]);
+    });
+
+    it('rejects mixed node+text and auto-escaped strings', () => {
+      expect(exclusiveForwardNodeList([
+        node,
+        { type: 'text', data: { text: 'hi' } },
+      ], false)).toBeNull();
+      expect(exclusiveForwardNodeList('hello', true)).toBeNull();
     });
   });
 

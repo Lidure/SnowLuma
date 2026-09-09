@@ -269,6 +269,25 @@ describe('apis/contacts / group roster', () => {
       allMuted: true,
     }));
   });
+
+  it('treats a past group-mute expire as unmuted (#356)', async () => {
+    const sendRawPacket = vi.fn(async () => groupListPacket({
+      groups: [{
+        groupUin: 123456789,
+        info: {
+          groupName: 'Was Muted',
+          shutUpAllTimestamp: 1_700_000_000,
+        },
+      }],
+    }));
+    const api = new ContactsApi({
+      sendRawPacket,
+      identity: { rememberGroups: vi.fn() },
+    } as any);
+
+    const groups = await api.fetchGroupList();
+    expect(groups[0]?.allMuted).toBe(false);
+  });
 });
 
 describe('apis/contacts / group requests', () => {
@@ -602,5 +621,20 @@ describe('apis/contacts / robot group-member classification', () => {
 
     expect(rangeAttempts).toBe(2);
     expect(rememberGroupMembers).toHaveBeenCalledOnce();
+  });
+});
+
+describe('apis/contacts / invite-card pending application', () => {
+  it('remembers, reads, and reverse-looks-up a card sequence', () => {
+    const api = new ContactsApi({ identity: { uin: '10001' } } as any);
+    expect(api.getGroupInviteCardSequence(12345)).toBeUndefined();
+
+    api.rememberGroupInviteCardSequence(12345, 778899);
+    api.rememberGroupInviteCardSequence(0, 1);
+    api.rememberGroupInviteCardSequence(1, 0);
+
+    expect(api.getGroupInviteCardSequence(12345)).toBe(778899);
+    expect(api.findGroupInviteCardGroupBySequence(778899)).toBe(12345);
+    expect(api.findGroupInviteCardGroupBySequence(1)).toBeUndefined();
   });
 });

@@ -14,6 +14,8 @@ const moduleLogger = createLogger('Identity');
 
 const PERSISTENCE_QUEUE_CAPACITY = 256;
 const PERSISTENCE_RETRY_DELAYS_MS = [100, 500, 2_000, 10_000, 30_000] as const;
+/** After persistence is suspended, do not warn on every skipped write. */
+const SKIPPED_WRITE_LOG_INTERVAL_MS = 60_000;
 
 export type IdentityPersistenceState = 'memory-only' | 'healthy' | 'degraded' | 'closed';
 
@@ -44,6 +46,8 @@ interface PendingIdentityWrite {
  */
 export interface IdentityFetcher {
   fetchProfile(uin: number): Promise<UserProfileInfo>;
+  /** Inbound UID→UIN network hop. Must not be used to refresh a group roster. */
+  fetchProfileByUid?(uid: string): Promise<UserProfileInfo>;
   fetchGroupMemberList?(groupId: number): Promise<unknown>;
 }
 
@@ -131,10 +135,6 @@ export class IdentityService {
   private readonly userProfiles_ = new Map<number, UserProfileInfo>();
   private friends_: FriendInfo[] = [];
   private readonly groups_ = new Map<number, QQGroupInfo>();
-  // groupUin → approval msgseq from a private "qun.invite" card's jumpUrl.
-  // The 0x10c8 approval for a bot self-invite needs THIS sequence (with
-  // eventType=2); the MSF invite push never carries it. See issue #125.
-  private readonly groupInviteCardSeqs_ = new Map<number, number>();
 
   // ─── Bidirectional UID↔UIN index (O(1), populated by every observation) ───
   private readonly uinByUid = new Map<string, number>();
@@ -161,6 +161,8 @@ export class IdentityService {
   private lastFailureAt_: number | null = null;
   private abandonedWrites_ = 0;
   private skippedWrites_ = 0;
+  private skippedWritesSinceLog_ = 0;
+  private lastSkippedWriteLogAt_ = 0;
   private persistenceSuspended_ = false;
   private closed_ = false;
 
@@ -431,9 +433,35 @@ export class IdentityService {
     throw new Error(`failed to resolve UID for UIN ${normalized}`);
   }
 
+  /**
+   * Inbound UID→UIN. Sync cache/DB (including a numeric UID) first; on miss,
+   * `fetchProfileByUid`. Returns null when still unknown. Never throws for a
+   * miss, a fetcher error, or a missing fetcher — inbound events still emit.
+   * Does not pull a group member list; that remains a roster side-effect.
+   */
+  async resolveUin(uid: string, groupId?: number): Promise<number | null> {
+    const cached = this.findUinByUid(uid, groupId);
+    if (cached !== null) return cached;
+
+    const normalized = normalizeUid(uid);
+    if (!normalized || !this.fetcher?.fetchProfileByUid) return null;
+
+    try {
+      const profile = await this.fetcher.fetchProfileByUid(normalized);
+      const uin = normalizeUin(profile.uin);
+      if (uin !== null) return uin;
+    } catch {
+      // Fall through: a fetcher that remembered then threw still counts as a hit.
+    }
+    return this.findUinByUid(normalized, groupId);
+  }
+
   findUinByUid(uid: string, groupId?: number): number | null {
     const normalized = normalizeUid(uid);
     if (!normalized) return null;
+
+    const numeric = numericUidAsUin(normalized);
+    if (numeric !== null) return numeric;
 
     if (groupId !== undefined) {
       const member = this.findGroupMemberByUid(groupId, normalized);
@@ -587,26 +615,6 @@ export class IdentityService {
     this.runWrite('user profile', () => this.transaction(() => this.upsertUser(persisted)));
   }
 
-  /** Remember the approval msgseq carried by a private "qun.invite" card's
-   *  jumpUrl, keyed by group. `set_group_add_request` reads it back to approve
-   *  a bot self-invite via 0x10c8 (eventType=2). See issue #125. */
-  rememberGroupInviteCardSequence(groupUin: number, sequence: number): void {
-    this.assertOpen('group invite sequence');
-    if (groupUin > 0 && sequence > 0) this.groupInviteCardSeqs_.set(groupUin, sequence);
-  }
-
-  getGroupInviteCardSequence(groupUin: number): number | undefined {
-    return this.groupInviteCardSeqs_.get(groupUin);
-  }
-
-  /** Reverse lookup used for NapCat-compatible numeric request flags. */
-  findGroupInviteCardGroupBySequence(sequence: number): number | undefined {
-    for (const [groupUin, rememberedSequence] of this.groupInviteCardSeqs_) {
-      if (rememberedSequence === sequence) return groupUin;
-    }
-    return undefined;
-  }
-
   rememberGroupRequests(requests: GroupRequestInfo[]): void {
     this.beginObservation('group requests');
     const observed = requests.map((request) => ({ ...request }));
@@ -674,12 +682,47 @@ export class IdentityService {
     })));
   }
 
+  /** Live 花名册: the joiner is in this group now. Does not invent card/role/isRobot.
+   *  No-op when the UIN is missing, the group is unknown, or the member is already present. */
+  rememberGroupMemberJoined(
+    groupId: number,
+    identity: { uid?: string; uin?: number },
+  ): void {
+    this.beginObservation('group member joined');
+    const uin = normalizeUin(identity.uin);
+    if (uin === null) return;
+    const g = this.groups_.get(groupId);
+    if (!g || g.members.has(uin)) return;
+    const uid = normalizeUid(identity.uid) ?? '';
+    this.rememberUidUin(uid, uin);
+    g.members.set(uin, {
+      uin,
+      uid,
+      nickname: '',
+      card: '',
+      role: 'member',
+      level: 0,
+      title: '',
+      joinTime: 0,
+      lastSentTime: 0,
+      shutUpTime: 0,
+    });
+  }
+
   markGroupMemberInactive(groupId: number, identity: { uid?: string; uin?: number }): void {
     this.beginObservation('group member inactive');
     const observed = { ...identity };
+    const uid = normalizeUid(observed.uid);
+    const uin = normalizeUin(observed.uin);
+    const g = this.groups_.get(groupId);
+    if (g) {
+      if (uin !== null) g.members.delete(uin);
+      else if (uid) {
+        const member = this.findGroupMemberByUid(groupId, uid);
+        if (member) g.members.delete(member.uin);
+      }
+    }
     this.runWrite('group member inactive', () => {
-      const uid = normalizeUid(observed.uid);
-      const uin = normalizeUin(observed.uin);
       if (!uid && uin === null) return;
       const rows = this.findMemberRows(groupId, uid, uin);
       const updatedAt = nowSeconds();
@@ -1238,6 +1281,8 @@ export class IdentityService {
     const attempts = this.retryAttempt_;
     this.retryAttempt_ = 0;
     this.nextRetryAt_ = null;
+    this.skippedWritesSinceLog_ = 0;
+    this.lastSkippedWriteLogAt_ = 0;
     this.log.info(
       'identity persistence recovered: uin=%s flushed=%d pending=0 retries=%d',
       this.uin_, pendingAtStart, attempts,
@@ -1264,9 +1309,27 @@ export class IdentityService {
   private recordSkippedWrite(label: string): void {
     this.skippedWrites_ += 1;
     this.abandonedWrites_ += 1;
+    const now = Date.now();
+    if (
+      this.lastSkippedWriteLogAt_ !== 0
+      && now - this.lastSkippedWriteLogAt_ < SKIPPED_WRITE_LOG_INTERVAL_MS
+    ) {
+      this.skippedWritesSinceLog_ += 1;
+      return;
+    }
+    const suppressed = this.skippedWritesSinceLog_;
+    this.skippedWritesSinceLog_ = 0;
+    this.lastSkippedWriteLogAt_ = now;
+    if (suppressed > 0) {
+      this.log.warn(
+        'identity persistence write skipped: uin=%s label=%s skipped=%d abandoned=%d suppressed=%d',
+        this.uin_, label, this.skippedWrites_, this.abandonedWrites_, suppressed,
+      );
+      return;
+    }
     this.log.warn(
-      'identity persistence write skipped: uin=%s label=%s pending=0 retry=%d skipped=%d abandoned=%d',
-      this.uin_, label, this.retryAttempt_, this.skippedWrites_, this.abandonedWrites_,
+      'identity persistence write skipped: uin=%s label=%s skipped=%d abandoned=%d',
+      this.uin_, label, this.skippedWrites_, this.abandonedWrites_,
     );
   }
 }
@@ -1301,6 +1364,12 @@ function rowToMemberInfo(row: {
 
 function normalizeUid(uid: unknown): string {
   return typeof uid === 'string' ? uid.trim() : '';
+}
+
+/** A UID that is itself a decimal UIN. Protocol fact, not a packet-header guess. */
+function numericUidAsUin(uid: string): number | null {
+  if (!/^\d+$/.test(uid)) return null;
+  return normalizeUin(uid);
 }
 
 function normalizeUin(uin: unknown): number | null {

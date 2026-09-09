@@ -1,5 +1,4 @@
 import { defineAction, groupAction, groupUserAction, f } from '../action-kit';
-import { asString } from '../api-handler';
 import { RETCODE, failedResponse, okResponse } from '../types';
 import { WebHonorType } from '@snowluma/protocol/web/group-honor';
 
@@ -115,6 +114,9 @@ export const actions = [
           unfriendly: { type: 'boolean', description: '是否不良记录（QQ NT 不提供，恒 false）' },
           title_expire_time: { type: 'integer', description: '头衔过期时间戳（QQ NT 不提供，恒 0）' },
           card_changeable: { type: 'boolean', description: '是否可改名片（占位，恒 true）' },
+          qidian_master_flag: { type: 'integer', description: '企点主号标志，0 或 1；普通账号为 0' },
+          qidian_crew_flag: { type: 'integer', description: '企点员工标志，0 或 1；普通账号为 0' },
+          qidian_crew_flag_2: { type: 'integer', description: '企点保留标志，0 或 1；普通账号为 0' },
         },
         required: ['group_id', 'user_id', 'nickname', 'role'],
       },
@@ -155,6 +157,9 @@ export const actions = [
         unfriendly: { type: 'boolean', description: '是否不良记录（QQ NT 不提供，恒 false）' },
         title_expire_time: { type: 'integer', description: '头衔过期时间戳（QQ NT 不提供，恒 0）' },
         card_changeable: { type: 'boolean', description: '是否可改名片（占位，恒 true）' },
+        qidian_master_flag: { type: 'integer', description: '企点主号标志，0 或 1；普通账号为 0' },
+        qidian_crew_flag: { type: 'integer', description: '企点员工标志，0 或 1；普通账号为 0' },
+        qidian_crew_flag_2: { type: 'integer', description: '企点保留标志，0 或 1；普通账号为 0' },
       },
       required: ['group_id', 'user_id', 'nickname', 'role'],
     },
@@ -171,6 +176,7 @@ export const actions = [
           sex: 'unknown', age: 0, join_time: 0, last_sent_time: 0,
           shut_up_timestamp: 0,
           level: '0', role: 'member', title: '',
+          qidian_master_flag: 0, qidian_crew_flag: 0, qidian_crew_flag_2: 0,
         });
       }
       return okResponse({
@@ -183,17 +189,14 @@ export const actions = [
     },
   }),
 
-  // `type` keeps the legacy `asString(x) || 'all'` semantics (absent / non-string
-  // / empty-string all collapse to 'all'), which a typed string field can't
-  // replicate exactly — so it stays a raw param coerced in run().
   groupAction({
     name: 'get_group_honor_info',
     summary: '获取群荣誉信息',
     readOnly: true,
-    params: { type: f.raw() },
+    params: { type: f.string().optional() },
     run: async (p, ctx) => {
       const groupId = p.group_id;
-      const typeStr = asString(p.type) || 'all';
+      const typeStr = p.type || 'all';
 
       const typeValues = Object.values(WebHonorType) as string[];
       if (!typeValues.includes(typeStr)) {
@@ -224,13 +227,16 @@ export const actions = [
           request_id: { type: 'integer', description: '请求序列号' },
           requester_uin: { type: 'integer', description: '申请人 QQ 号' },
           requester_nick: { type: 'string', description: '申请人昵称' },
+          invitor_uin: { type: 'integer', description: '邀请人 QQ 号，无邀请时为 0' },
+          invitor_nick: { type: 'string', description: '邀请人昵称' },
           message: { type: 'string', description: '验证留言' },
           checked: { type: 'boolean', description: '是否已处理' },
           flag: { type: 'string', description: '处理请求使用的规范 flag' },
         },
         required: [
           'group_id', 'group_name', 'request_id', 'requester_uin',
-          'requester_nick', 'message', 'checked', 'flag',
+          'requester_nick', 'invitor_uin', 'invitor_nick',
+          'message', 'checked', 'flag',
         ],
       },
     },

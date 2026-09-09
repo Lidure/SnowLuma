@@ -6,7 +6,6 @@ import type {
   GroupEssenceMessage,
 } from '@snowluma/protocol/web/group-essence';
 import type { ApiActionContext } from '../api-handler';
-import { asNumber, asString } from '../api-handler';
 import type { ForwardPreviewMeta } from '../modules/message-actions';
 import {
   hasAuthoritativeSequence,
@@ -14,14 +13,42 @@ import {
   failedResponse,
   okResponse,
   type JsonObject,
+  type JsonValue,
   type MessageMeta,
 } from '../types';
-import { defineAction, groupAction, groupUserAction, f } from '../action-kit';
+import { defineAction, groupAction, groupUserAction, f, type Field } from '../action-kit';
 import { groupInfoReturnsSchema } from './group-info';
 import { GROUP_MESSAGE_EVENT, hashMessageIdInt32 } from '../message-id';
 
 const DOWNLOAD_FILE_MAX_BYTES = 1024 * 1024 * 1024; // 1 GiB
 const DOWNLOAD_FILE_TIMEOUT_MS = 60_000;
+
+const profileLikeUserSchema = {
+  type: 'object',
+  properties: {
+    uid: { type: 'string', description: '用户 uid' },
+    uin: { type: 'integer', description: '用户 QQ 号；资料中没有有效号码时为 0' },
+    src: { type: 'integer', description: '来源类型' },
+    latestTime: { type: 'integer', description: '最近互动时间戳' },
+    count: { type: 'integer', description: '互动次数' },
+    giftCount: { type: 'integer', description: '礼物数量' },
+    customId: { type: 'integer', description: '自定义标识' },
+    lastCharged: { type: 'integer', description: '最近充能时间' },
+    bAvailableCnt: { type: 'integer', description: '可用次数' },
+    bTodayVotedCnt: { type: 'integer', description: '今日已点赞次数' },
+    nick: { type: 'string', description: '昵称' },
+    gender: { type: 'integer', description: '性别' },
+    age: { type: 'integer', description: '年龄' },
+    isFriend: { type: 'boolean', description: '是否为好友' },
+    isvip: { type: 'boolean', description: '是否为会员' },
+    isSvip: { type: 'boolean', description: '是否为超级会员' },
+  },
+  required: [
+    'uid', 'uin', 'src', 'latestTime', 'count', 'giftCount', 'customId',
+    'lastCharged', 'bAvailableCnt', 'bTodayVotedCnt', 'nick', 'gender',
+    'age', 'isFriend', 'isvip', 'isSvip',
+  ],
+};
 
 function essenceNumber(value: unknown, field: string): number {
   if (typeof value !== 'number'
@@ -235,19 +262,57 @@ async function saveDownloadBuffer(buf: Buffer, preferredName: string): Promise<s
   return resolved;
 }
 
-// 从 send_*_forward_msg 的参数里提取 NapCat 兼容的转发预览元信息。四个字段都是可选的——如果没有提供，模块层会根据实际消息节点列表推断出合理的默认值。
-function readForwardPreviewMeta(params: Record<string, unknown>): ForwardPreviewMeta | undefined {
-  const source = asString(params.source) || undefined;
-  const summary = asString(params.summary) || undefined;
-  const prompt = asString(params.prompt) || undefined;
+function optionalExactString(): Field<string | undefined> {
+  const inner = f.string().optional();
+  return Object.assign(Object.create(inner) as Field<string | undefined>, {
+    coerce(raw: unknown, field: string) {
+      if (typeof raw === 'number' || typeof raw === 'boolean' || raw === null
+        || (typeof raw === 'object' && raw !== null)) {
+        return { ok: false as const, field, reason: 'expected a string' };
+      }
+      return inner.coerce(raw as Parameters<Field<string | undefined>['coerce']>[0], field);
+    },
+  });
+}
+
+function integerFromDecimalString(value: string): number {
+  if (value.trim() === '') return 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+}
+
+function primitiveText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return '';
+}
+
+const forwardPreviewParams = {
+  source: f.string().optional(),
+  summary: f.string().optional(),
+  prompt: f.string().optional(),
+  news: f.raw(),
+};
+
+// NapCat-compatible forward preview. All four fields are optional — if none
+// are provided, the message module infers defaults from the node list.
+function readForwardPreviewMeta(p: {
+  source?: string;
+  summary?: string;
+  prompt?: string;
+  news?: JsonValue;
+}): ForwardPreviewMeta | undefined {
+  const source = p.source || undefined;
+  const summary = p.summary || undefined;
+  const prompt = p.prompt || undefined;
   let news: Array<{ text: string }> | undefined;
-  if (Array.isArray(params.news)) {
+  if (Array.isArray(p.news)) {
     const collected: Array<{ text: string }> = [];
-    for (const item of params.news) {
+    for (const item of p.news) {
       if (typeof item === 'string') {
         collected.push({ text: item });
       } else if (item && typeof item === 'object' && !Array.isArray(item)) {
-        const text = asString((item as Record<string, unknown>).text);
+        const text = primitiveText((item as Record<string, unknown>).text);
         if (text) collected.push({ text });
       }
     }
@@ -273,6 +338,31 @@ async function groupTodoRun(
   }
   await op(p.group_id, BigInt(meta.sequence));
   return okResponse();
+}
+
+function parseFlashTaskFiles(
+  raw: unknown,
+): { files: Array<{ file: string; name?: string }> } | { error: string } {
+  const items = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+  if (items.length === 0) return { error: 'files must not be empty' };
+  const files: Array<{ file: string; name?: string }> = [];
+  for (const item of items) {
+    if (typeof item === 'string') {
+      if (item === '') return { error: 'files must not be empty' };
+      files.push({ file: item });
+      continue;
+    }
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const file = (item as { file?: unknown }).file;
+      const name = (item as { name?: unknown }).name;
+      if (typeof file !== 'string' || file === '') return { error: 'files must not be empty' };
+      if (name !== undefined && typeof name !== 'string') return { error: 'files[].name must be a string' };
+      files.push({ file, name });
+      continue;
+    }
+    return { error: 'files must be a path string, { file, name }, or an array of those' };
+  }
+  return { files };
 }
 
 /** FlashTransferApi 返回的 FlashFileInfo → OneBot JSON 响应（plain object，JsonObject 兼容）。
@@ -749,13 +839,10 @@ export const actions = [
       required: ['text'],
     },
     params: {
-      message_id: f.string().default('').role('message_id'),
+      message_id: f.messageId(),
     },
-    // `raw` so message_id works whether the client sends a number or a string.
-    run: async (_p, ctx, raw) => {
-      const messageId = asNumber(raw.message_id);
-      if (!messageId) return failedResponse(RETCODE.BAD_REQUEST, 'message_id is required');
-      return okResponse(await ctx.fetchPttText(messageId));
+    run: async (p, ctx) => {
+      return okResponse(await ctx.fetchPttText(p.message_id));
     },
   }),
 
@@ -944,12 +1031,10 @@ export const actions = [
     params: {
       nickname: f.string().optional(),
       personal_note: f.string().optional(),
+      sex: f.int({ min: 0, max: 2 }).optional().describe('0 未知，1 男，2 女'),
     },
     run: async (p, ctx) => {
-      const nickname = p.nickname;
-      const personalNote = p.personal_note;
-
-      await ctx.bridge.apis.profile.setProfile(nickname, personalNote);
+      await ctx.bridge.apis.profile.setProfile(p.nickname, p.personal_note, p.sex);
       return okResponse();
     },
   }),
@@ -1150,7 +1235,7 @@ export const actions = [
     name: 'get_profile_like',
     summary: '获取资料点赞',
     readOnly: true,
-    returns: '点赞资料：uid、最近点赞时间、收藏（favoriteInfo）与点赞（voteInfo）统计。',
+    returns: '点赞资料：uid、最近点赞时间、收藏与点赞统计及用户明细。',
     returnsSchema: {
       type: 'object',
       properties: {
@@ -1163,7 +1248,11 @@ export const actions = [
             total_count: { type: 'integer', description: '收藏总数' },
             last_time: { type: 'integer', description: '最近收藏时间戳' },
             today_count: { type: 'integer', description: '今日收藏数' },
-            userInfos: { type: 'array', description: '用户列表（恒空）' },
+            userInfos: {
+              type: 'array',
+              description: '收藏用户列表',
+              items: profileLikeUserSchema,
+            },
           },
         },
         voteInfo: {
@@ -1174,7 +1263,11 @@ export const actions = [
             new_count: { type: 'integer', description: '新增点赞数' },
             new_nearby_count: { type: 'integer', description: '附近的人新增点赞数' },
             last_visit_time: { type: 'integer', description: '最近访问时间戳' },
-            userInfos: { type: 'array', description: '用户列表（恒空）' },
+            userInfos: {
+              type: 'array',
+              description: '点赞用户列表',
+              items: profileLikeUserSchema,
+            },
           },
         },
       },
@@ -1208,15 +1301,10 @@ export const actions = [
       return_type: f.string().default('url'),
     },
     run: async (p, ctx) => {
-      const urls = await ctx.bridge.apis.profile.fetchCustomFace(p.count);
       if (p.return_type === 'id') {
-        const emojiIds = urls.map((url) => {
-          const m = /\/qq_expression\/[^/]+\/([^/]+)\//.exec(url);
-          return m ? m[1] : '';
-        }).filter(Boolean);
-        return okResponse(emojiIds);
+        return okResponse(await ctx.bridge.apis.profile.fetchCustomFaceIds(p.count));
       }
-      return okResponse(urls);
+      return okResponse(await ctx.bridge.apis.profile.fetchCustomFace(p.count));
     },
   }),
 
@@ -1337,6 +1425,41 @@ export const actions = [
         isLastPage,
         isFirstPage: offset === 0,
       });
+    },
+  }),
+
+  defineAction({
+    name: 'get_msg_emoji_likes',
+    summary: '获取一条消息的全部表情回应',
+    readOnly: true,
+    returns: '该消息上每个表情回应的编号、数量与用户列表。',
+    returnsSchema: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          emoji_id: { type: 'string', description: '表情编号' },
+          emoji_type: { type: 'integer', description: '表情类型' },
+          count: { type: 'integer', description: '回应数量' },
+          last_reaction_time: { type: 'integer', description: '最近一次回应时间' },
+          users: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { user_id: { type: 'integer', description: '用户 QQ 号' } },
+              required: ['user_id'],
+            },
+          },
+        },
+        required: ['emoji_id', 'emoji_type', 'count', 'last_reaction_time', 'users'],
+      },
+    },
+    params: { message_id: f.messageId() },
+    run: async (p, ctx) => {
+      if (!ctx.fetchEmojiLikeSummary) {
+        return failedResponse(RETCODE.ACTION_FAILED, 'emoji reaction summary is unavailable');
+      }
+      return okResponse(await ctx.fetchEmojiLikeSummary(p.message_id));
     },
   }),
 
@@ -1646,6 +1769,55 @@ export const actions = [
     },
   }),
 
+  // send_tuwen_ark — send a custom 图文 (URL-share) ark card to a C2C peer or group (0xdc2_34).
+  // targetId at AppInfo[11] and Meta[2]; Meta.peerType: 0=C2C, 1=group.
+  // 与 send_ark_share 的区别：send_ark_share 只获取推荐联系人 JSON 不发送；
+  // 与 send_msg share/json 的区别：后者发送 structmsg 图文卡且有 message_id，
+  // 本 action 发送固定图文 ark 模板，返回 null（无法用于撤回/设精华）。
+  defineAction({
+    name: 'send_tuwen_ark',
+    summary: '发送图文 Ark 卡片（私聊/群聊）',
+    readOnly: false,
+    returns: 'null',
+    returnsSchema: { type: 'null' },
+    params: {
+      user_id:     f.userId().optional(),
+      group_id:    f.groupId().optional(),
+      title:       f.string(),
+      desc:        f.string(),
+      summary:     f.string().default('[分享]'),
+      preview_url: f.string().default('https://tangram-1251316161.file.myqcloud.com/files/20210721/e50a8e37e08f29bf1ffc7466e1950690.png'),
+      jump_url:    f.string(),
+    },
+    run: async (p, ctx) => {
+      if (p.group_id) {
+        await ctx.bridge.apis.contacts.sendTuwenArk({
+          targetId:   p.group_id,
+          peerType:   1,
+          title:      p.title,
+          desc:       p.desc,
+          summary:    p.summary,
+          previewUrl: p.preview_url,
+          jumpUrl:    p.jump_url,
+        });
+        return okResponse(null);
+      }
+      if (p.user_id) {
+        await ctx.bridge.apis.contacts.sendTuwenArk({
+          targetId:   p.user_id,
+          peerType:   0,
+          title:      p.title,
+          desc:       p.desc,
+          summary:    p.summary,
+          previewUrl: p.preview_url,
+          jumpUrl:    p.jump_url,
+        });
+        return okResponse(null);
+      }
+      return failedResponse(RETCODE.BAD_REQUEST, 'user_id or group_id is required');
+    },
+  }),
+
   // share_group_ex / send_group_ark_share — group-only Ark share. NapCat uses
   // a distinct kernel API (getArkJsonGroupShare) we did NOT RE; we route to
   // the fully-RE'd group recommend-contact ark (0x8b7_5), the closest
@@ -1686,12 +1858,15 @@ export const actions = [
         type: 'object',
         properties: {
           uid: { type: 'string', description: '申请人 uid（回传作 set_doubt_friends_add_request 的 flag）' },
+          user_id: { type: 'integer', description: '申请人 QQ 号' },
           nick: { type: 'string', description: '申请人昵称' },
           source: { type: 'string', description: '申请来源' },
+          reason: { type: 'string', description: '附加说明' },
           msg: { type: 'string', description: '验证留言' },
+          group_code: { type: 'string', description: '来源群号，无则为空串' },
           reqTime: { type: 'integer', description: '申请时间戳' },
         },
-        required: ['uid', 'nick', 'source', 'msg', 'reqTime'],
+        required: ['uid', 'user_id', 'nick', 'source', 'reason', 'msg', 'group_code', 'reqTime'],
       },
     },
     params: { count: f.int({ min: 0 }).default(50) },
@@ -2128,8 +2303,7 @@ export const actions = [
     },
   }),
 
-  // ===== 原 legacy registerAction，现并入 kit（ctx 调用与逻辑逐字保留；
-  // 别名键 / 原始参数透传 / 任意对象经 run 第三参 raw 或 f.raw() 表达）=====
+  // ===== 原 legacy registerAction，现并入 kit =====
 
   defineAction({
     name: ['get_rkey', 'nc_get_rkey'],
@@ -2267,16 +2441,22 @@ export const actions = [
     name: 'send_forward_msg',
     summary: '发送合并转发（按 message_type/群号自动路由）',
     returns: '{ message_id, res_id, forward_id }',
-    // group_id/user_id 是“路由提示”而非身份字段：原实现用 asNumber + `>0` 判断，
-    // 占位的 0 表示“该分支不适用”、不应报错。故从 raw 读取（保持旧语义），
-    // 只声明 messages/message。
-    params: { messages: f.message().optional(), message: f.message().optional() },
-    run: async (p, ctx, raw) => {
-      const messageType = asString(raw.message_type);
-      const groupId = asNumber(raw.group_id);
-      const userId = asNumber(raw.user_id);
+    // group_id/user_id are routing hints, not identity: 0 means "this branch
+    // does not apply" and must not error. int({min:0}) optional, not groupId.
+    params: {
+      messages: f.message().optional(),
+      message: f.message().optional(),
+      message_type: f.string().optional(),
+      group_id: f.int({ min: 0 }).optional(),
+      user_id: f.int({ min: 0 }).optional(),
+      ...forwardPreviewParams,
+    },
+    run: async (p, ctx) => {
+      const messageType = p.message_type ?? '';
+      const groupId = p.group_id ?? 0;
+      const userId = p.user_id ?? 0;
       const messages = p.messages ?? p.message;
-      const meta = readForwardPreviewMeta(raw);
+      const meta = readForwardPreviewMeta(p);
       if (messages === undefined) return failedResponse(RETCODE.BAD_REQUEST, 'message/messages is required');
       if ((messageType === 'group' || groupId > 0) && ctx.sendGroupForwardMsg) {
         if (!groupId) return failedResponse(RETCODE.BAD_REQUEST, 'group_id is required');
@@ -2297,11 +2477,15 @@ export const actions = [
     name: 'send_group_forward_msg',
     summary: '发送群合并转发',
     returns: '{ message_id, res_id, forward_id }',
-    params: { messages: f.message().optional(), message: f.message().optional() },
-    run: async (p, ctx, raw) => {
+    params: {
+      messages: f.message().optional(),
+      message: f.message().optional(),
+      ...forwardPreviewParams,
+    },
+    run: async (p, ctx) => {
       const messages = p.messages ?? p.message;
       if (messages === undefined) return failedResponse(RETCODE.BAD_REQUEST, 'message/messages is required');
-      const result = await ctx.sendGroupForwardMsg(p.group_id, messages, readForwardPreviewMeta(raw));
+      const result = await ctx.sendGroupForwardMsg(p.group_id, messages, readForwardPreviewMeta(p));
       return okResponse({ message_id: result.messageId, res_id: result.forwardId, forward_id: result.forwardId });
     },
   }),
@@ -2310,11 +2494,16 @@ export const actions = [
     name: 'send_private_forward_msg',
     summary: '发送私聊合并转发',
     returns: '{ message_id, res_id, forward_id }',
-    params: { user_id: f.userId(), messages: f.message().optional(), message: f.message().optional() },
-    run: async (p, ctx, raw) => {
+    params: {
+      user_id: f.userId(),
+      messages: f.message().optional(),
+      message: f.message().optional(),
+      ...forwardPreviewParams,
+    },
+    run: async (p, ctx) => {
       const messages = p.messages ?? p.message;
       if (messages === undefined) return failedResponse(RETCODE.BAD_REQUEST, 'message/messages is required');
-      const result = await ctx.sendPrivateForwardMsg(p.user_id, messages, readForwardPreviewMeta(raw));
+      const result = await ctx.sendPrivateForwardMsg(p.user_id, messages, readForwardPreviewMeta(p));
       return okResponse({ message_id: result.messageId, res_id: result.forwardId, forward_id: result.forwardId });
     },
   }),
@@ -2331,12 +2520,11 @@ export const actions = [
       },
       required: ['messages'],
     },
-    params: { id: f.string().optional() },
-    run: async (p, ctx, raw) => {
+    params: { id: f.string().optional(), message_id: f.string().optional() },
+    run: async (p, ctx) => {
       let id = p.id || '';
-      if (!id) {
-        const rawMessageId = raw.message_id;
-        const numericMessageId = asNumber(rawMessageId);
+      if (!id && p.message_id !== undefined) {
+        const numericMessageId = integerFromDecimalString(p.message_id);
         if (numericMessageId > 0) {
           const event = ctx.getMessage(numericMessageId);
           const segments = Array.isArray(event?.message) ? event.message : [];
@@ -2347,11 +2535,11 @@ export const actions = [
             const data = (typeof so.data === 'object' && so.data !== null && !Array.isArray(so.data))
               ? so.data as Record<string, unknown>
               : null;
-            const candidate = asString(data?.id) || asString(data?.res_id) || asString(data?.forward_id);
+            const candidate = primitiveText(data?.id) || primitiveText(data?.res_id) || primitiveText(data?.forward_id);
             if (candidate) { id = candidate; break; }
           }
         }
-        if (!id) id = asString(rawMessageId);
+        if (!id) id = p.message_id;
       }
       if (!id) return failedResponse(RETCODE.BAD_REQUEST, 'id or message_id is required');
       const messages = await ctx.getForwardMsg(id);
@@ -2363,8 +2551,13 @@ export const actions = [
     name: 'download_file',
     summary: '下载文件（url 或 base64）到 data/downloads',
     returns: '{ file }',
-    params: { url: f.string().default(''), base64: f.string().default(''), name: f.string().default('') },
-    run: async (p, _ctx, raw) => {
+    params: {
+      url: f.string().default(''),
+      base64: f.string().default(''),
+      name: f.string().default(''),
+      headers: f.raw(),
+    },
+    run: async (p) => {
       const url = p.url;
       const base64 = p.base64;
       const name = p.name;
@@ -2376,7 +2569,7 @@ export const actions = [
         buf = Buffer.from(base64, 'base64');
         if (buf.length > DOWNLOAD_FILE_MAX_BYTES) return failedResponse(RETCODE.BAD_REQUEST, `base64 payload too large: ${buf.length} > ${DOWNLOAD_FILE_MAX_BYTES} bytes`);
       } else {
-        buf = await fetchDownloadFile(url, parseDownloadHeaders(raw.headers), DOWNLOAD_FILE_MAX_BYTES, DOWNLOAD_FILE_TIMEOUT_MS);
+        buf = await fetchDownloadFile(url, parseDownloadHeaders(p.headers), DOWNLOAD_FILE_MAX_BYTES, DOWNLOAD_FILE_TIMEOUT_MS);
       }
       try {
         const safe = await saveDownloadBuffer(buf, name);
@@ -2399,12 +2592,9 @@ export const actions = [
       },
       required: ['words'],
     },
-    params: { words: f.raw() },
+    params: { words: f.array(f.string()) },
     run: async (p, ctx) => {
-      const rawWords = p.words;
-      if (!Array.isArray(rawWords)) return failedResponse(RETCODE.BAD_REQUEST, 'invalid words array');
-      const words = rawWords.map((w) => String(w));
-      const translated = await ctx.bridge.apis.misc.translateEn2Zh(words);
+      const translated = await ctx.bridge.apis.misc.translateEn2Zh(p.words);
       return okResponse({ words: translated });
     },
   }),
@@ -2412,7 +2602,7 @@ export const actions = [
   defineAction({
     name: 'set_self_longnick',
     summary: '设置个性签名（longNick/long_nick，严格 string）',
-    params: { longNick: f.raw(), long_nick: f.raw() },
+    params: { longNick: optionalExactString(), long_nick: optionalExactString() },
     run: async (p, ctx) => {
       const longNick = p.longNick !== undefined ? p.longNick : p.long_nick;
       if (typeof longNick !== 'string') return failedResponse(RETCODE.BAD_REQUEST, 'invalid longNick');
@@ -2425,14 +2615,22 @@ export const actions = [
     name: 'get_mini_app_ark',
     summary: '获取小程序卡片 ark',
     readOnly: true,
-    params: {},
-    run: async (_p, ctx, raw) => {
-      const type = raw.type || 'bili';
-      const title = raw.title || '';
-      const desc = raw.desc || '';
-      const picUrl = raw.picUrl || raw.pic_url || '';
-      const jumpUrl = raw.jumpUrl || raw.jump_url || '';
-      const data = await ctx.bridge.apis.misc.getMiniAppArk(String(type), String(title), String(desc), String(picUrl), String(jumpUrl));
+    params: {
+      type: f.string().optional(),
+      title: f.string().optional(),
+      desc: f.string().optional(),
+      picUrl: f.string().optional(),
+      pic_url: f.string().optional(),
+      jumpUrl: f.string().optional(),
+      jump_url: f.string().optional(),
+    },
+    run: async (p, ctx) => {
+      const type = p.type || 'bili';
+      const title = p.title || '';
+      const desc = p.desc || '';
+      const picUrl = p.picUrl || p.pic_url || '';
+      const jumpUrl = p.jumpUrl || p.jump_url || '';
+      const data = await ctx.bridge.apis.misc.getMiniAppArk(type, title, desc, picUrl, jumpUrl);
       return okResponse(data);
     },
   }),
@@ -2440,12 +2638,20 @@ export const actions = [
   groupAction({
     name: 'click_inline_keyboard_button',
     summary: '点击内联键盘按钮',
-    params: { bot_appid: f.uint(), msg_seq: f.uint() },
-    run: async (p, ctx, raw) => {
-      const buttonId = raw.button_id;
-      const callbackData = raw.callback_data || '';
-      if (!buttonId) return failedResponse(RETCODE.BAD_REQUEST, 'missing required parameters');
-      const data = await ctx.bridge.apis.misc.clickInlineKeyboardButton(p.group_id, p.bot_appid, String(buttonId), String(callbackData), p.msg_seq);
+    params: {
+      bot_appid: f.uint(),
+      msg_seq: f.uint(),
+      button_id: f.string({ allowEmpty: false }),
+      callback_data: f.string().default(''),
+    },
+    run: async (p, ctx) => {
+      const data = await ctx.bridge.apis.misc.clickInlineKeyboardButton(
+        p.group_id,
+        p.bot_appid,
+        p.button_id,
+        p.callback_data,
+        p.msg_seq,
+      );
       return okResponse(data);
     },
   }),
@@ -2549,25 +2755,15 @@ export const actions = [
     name: 'create_flash_task',
     summary: '创建闪传任务',
     params: {
-      // files 支持单个路径(string)或多个路径(string[])，多文件共用一个 fileset
-      files: f.raw(),
+      // 路径、{ file, name }，或它们的数组；name 是该文件在闪传里的显示名
+      files: f.raw().describe('路径、{ file, name }，或它们的数组'),
       name: f.string().optional(),
       thumb_path: f.string().optional(),
     },
     run: async (p, ctx) => {
-      // f.raw() 不做校验，这里归一化为 string[] 并校验
-      const rawFiles = p.files;
-      let fileList: string[];
-      if (typeof rawFiles === 'string') {
-        if (rawFiles === '') return failedResponse(RETCODE.BAD_REQUEST, 'files must not be empty');
-        fileList = [rawFiles];
-      } else if (Array.isArray(rawFiles) && rawFiles.every((x) => typeof x === 'string' && x !== '')) {
-        if (rawFiles.length === 0) return failedResponse(RETCODE.BAD_REQUEST, 'files must not be empty');
-        fileList = rawFiles as string[];
-      } else {
-        return failedResponse(RETCODE.BAD_REQUEST, 'files must be a string or string array');
-      }
-      const result = await ctx.bridge.apis.flashTransfer.createFlashTask(fileList, p.name, p.thumb_path);
+      const parsed = parseFlashTaskFiles(p.files);
+      if ('error' in parsed) return failedResponse(RETCODE.BAD_REQUEST, parsed.error);
+      const result = await ctx.bridge.apis.flashTransfer.createFlashTask(parsed.files, p.name, p.thumb_path);
       return okResponse({ fileset_id: result.filesetId, task_id: result.filesetId });
     },
   }),

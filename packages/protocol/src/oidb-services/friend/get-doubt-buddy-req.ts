@@ -1,10 +1,9 @@
 // 0xd69_0 — getDoubtBuddyReq: list the "doubtful" friend-add requests
 // (可能认识的人 / 被过滤的好友申请). RE'd from QQNT doubt_codec.cc.
 // Request {1:1, 2:{1:num, 2:uk}} (reqId is NOT on the wire). Response body
-// holds a repeated item list; we surface the fields NapCat exposes.
-// READ-only: the string field names (nick/source/msg) are MEDIUM confidence
-// (generic serializer), so a mislabel is cosmetic, never a wire/ban risk.
-// uid (tag1) and reqTime (tag9) are HIGH confidence.
+// holds a repeated item list. DecodePullDoubtReq maps uid as a string and
+// the account number as a separate integer field; do not reread the uid
+// field as a number. String names (nick/source/msg) are MEDIUM confidence.
 
 import { protobuf_decode, protobuf_encode } from '@snowluma/proton';
 import type { OidbBase } from '@snowluma/proto-defs/oidb';
@@ -17,9 +16,12 @@ export interface DoubtBuddyRequest {
   [key: string]: import('@snowluma/common/json').JsonValue;
   /** Opaque uid — pass back as `flag` to set_doubt_friends_add_request. */
   uid: string;
+  user_id: number;
   nick: string;
   source: string;
+  reason: string;
   msg: string;
+  group_code: string;
   reqTime: number;
 }
 
@@ -39,9 +41,12 @@ export namespace GetDoubtBuddyReq {
   export const deserialize = (_ctx: Deps, body: OidbDoubtGetResp): DoubtBuddyRequest[] =>
     (body.body?.list ?? []).map((it) => ({
       uid: it.uid ?? '',
+      user_id: Number(it.uin ?? 0),
       nick: it.nick ?? '',
       source: it.source ?? '',
+      reason: it.reason ?? '',
       msg: it.msg ?? '',
+      group_code: it.groupCode ?? '',
       reqTime: Number(it.reqTime ?? 0),
     }));
 

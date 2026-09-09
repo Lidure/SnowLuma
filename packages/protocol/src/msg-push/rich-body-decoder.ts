@@ -19,9 +19,11 @@ import type { MarkdownData } from '@snowluma/proto-defs/action';
 import type { FileExtra, MessageBody, PushMsgBody as PushMsgBodyFull, RichText } from '@snowluma/proto-defs/message';
 import {
   decompressData,
+  imageUrlFromMd5,
   makeImageUrl,
   MAX_RICH_CARD_MESSAGE_OUTPUT_BYTES,
   MAX_RICH_CARD_OUTPUT_BYTES,
+  ntImageUrlFromFileId,
 } from './helpers';
 
 type ElemDecoded = Elem;
@@ -228,15 +230,14 @@ function decodeMarkdownCommonElement(pbElem: Uint8Array, businessType: number): 
     () => protobuf_decode<MarkdownData>(pbElem),
   );
   const content = md?.content ?? '';
-  if (!content) return null;
-
-  // Business type 3 is also used by the old flash-transfer richui card. Keep
-  // that semantic element instead of exposing the transport markdown. If a
-  // payload identifies itself as FlashTransfer but is malformed, fail open to
-  // the sibling compatibility text rather than misreporting it as markdown.
-  if (businessType === 3 && content.includes('FlashTransfer')) {
-    return decodeFlashTransferMarkdown(content);
+  // Business type 3 carries the 闪传 card. Current NT puts fileset identity
+  // on extType=1 / extInfo (DecodeMdExtInfoFileTransfer); older cards only
+  // have it inside the richui JSON. If the payload looks like FlashTransfer
+  // but has no fileset, fail open to the sibling compatibility text.
+  if (md && businessType === 3 && isFlashTransferMarkdown(md, content)) {
+    return decodeFlashTransfer(md);
   }
+  if (!content) return null;
   return { type: 'markdown', text: content };
 }
 
@@ -458,13 +459,26 @@ function buildMediaNode(idx: IndexNode, fi: FileInfo): MessageElement['mediaNode
   };
 }
 
+/** Whether this body carries any slot {@link decodeRichBody} would try:
+ *  `richText.elems`, a voice (`ptt`), a c2c file (`notOnlineFile`), or
+ *  serialized `msgContent`. Presence, not successful decode — a body that
+ *  has elems we do not yet understand is still decodable content. */
+export function hasDecodableContent(body: PushMsgBody | undefined): boolean {
+  const rt = body?.richText;
+  if (rt) {
+    if (rt.elems && rt.elems.length > 0) return true;
+    if (rt.ptt || rt.notOnlineFile) return true;
+  }
+  return !!(body?.msgContent && body.msgContent.length > 0);
+}
+
 export function decodeRichBody(body: PushMsgBody | undefined, isGroup: boolean): MessageElement[] {
   const elements: MessageElement[] = [];
   logUnknownWireFields(body, 'body');
   if (body?.richText) {
     const rt = body.richText;
     logUnknownWireFields(rt, 'body.richText');
-    if (rt.elems) elements.push(...convertElements(rt.elems as ElemDecoded[]));
+    if (rt.elems) elements.push(...convertElements(rt.elems as ElemDecoded[], isGroup));
     extractRichtextExtras(rt, elements, isGroup);
   }
   if (body?.msgContent && body.msgContent.length > 0) {
@@ -473,7 +487,7 @@ export function decodeRichBody(body: PushMsgBody | undefined, isGroup: boolean):
   return elements;
 }
 
-function convertElements(elems: ElemDecoded[]): MessageElement[] {
+function convertElements(elems: ElemDecoded[], isGroup: boolean): MessageElement[] {
   const result: MessageElement[] = [];
   // [#146/#337] Rich cards and bot markdown arrive beside a plain compatibility
   // `text` element for older clients. That sibling has no independent wire
@@ -487,7 +501,9 @@ function convertElements(elems: ElemDecoded[]): MessageElement[] {
   const decodedInlineKeyboards = decodeInlineKeyboardsOnce(elems);
   const hasRichContent = [...decodedCards.values()].some((cards) => (
     Boolean(cards.rich?.element || cards.light?.element)
-  )) || [...decodedMarkdown.values()].some((element) => element?.type === 'markdown');
+  )) || [...decodedMarkdown.values()].some((element) => (
+    element?.type === 'markdown' || element?.type === 'flash_file'
+  ));
   // QQ NT serializes a service-37 big face as the CommonElem followed by a
   // compatibility TextElem. The latter repeats QFaceExtra.text in `str`, while
   // field 12 contains a nested TextElem whose `str` is
@@ -548,7 +564,7 @@ function convertElements(elems: ElemDecoded[]): MessageElement[] {
             );
             if (nested) decoded.push(nested);
           }
-          if (decoded.length) reply.replyElements = convertElements(decoded);
+          if (decoded.length) reply.replyElements = convertElements(decoded, isGroup);
         }
         // A C2C quoted FILE lives in RichText.notOnlineFile (message level), not
         // in elems[] — recover it from sourceMsg (field 9) when elems carried no
@@ -652,11 +668,12 @@ function convertElements(elems: ElemDecoded[]): MessageElement[] {
     if (elem.notOnlineImage) {
       const img = elem.notOnlineImage;
       if (img.picMd5?.length === 16) {
+        const md5Hex = toHexUpper(img.picMd5);
         const urlPath = img.origUrl || img.bigUrl || '';
         result.push({
           type: 'image',
-          imageUrl: makeImageUrl(urlPath),
-          fileId: img.filePath ?? '',
+          imageUrl: makeImageUrl(urlPath) || (!urlPath ? imageUrlFromMd5(md5Hex) : ''),
+          fileId: img.filePath || md5Hex,
           fileSize: img.fileLen ?? 0,
           width: img.picWidth ?? 0,
           height: img.picHeight ?? 0,
@@ -666,7 +683,7 @@ function convertElements(elems: ElemDecoded[]): MessageElement[] {
           // expect these literal Chinese strings when the wire
           // doesn't carry a per-image override.
           summary: img.pbRes?.summary || (img.pbRes?.subType === 1 ? '[动画表情]' : '[图片]'),
-          md5Hex: toHexUpper(img.picMd5),
+          md5Hex,
         });
       }
     }
@@ -675,16 +692,18 @@ function convertElements(elems: ElemDecoded[]): MessageElement[] {
     if (elem.customFace) {
       const img = elem.customFace;
       if (img.md5?.length === 16) {
+        const md5Hex = toHexUpper(img.md5);
+        const origUrl = img.origUrl ?? '';
         result.push({
           type: 'image',
-          imageUrl: makeImageUrl(img.origUrl ?? ''),
-          fileId: img.filePath ?? '',
+          imageUrl: makeImageUrl(origUrl) || (!origUrl ? imageUrlFromMd5(md5Hex) : ''),
+          fileId: img.filePath || md5Hex,
           fileSize: img.size ?? 0,
           width: img.width ?? 0,
           height: img.height ?? 0,
           subType: img.pbRes?.subType ?? 0,
           summary: img.pbRes?.summary || (img.pbRes?.subType === 1 ? '[动画表情]' : '[图片]'),
-          md5Hex: toHexUpper(img.md5),
+          md5Hex,
         });
       }
     }
@@ -835,8 +854,10 @@ function convertElements(elems: ElemDecoded[]): MessageElement[] {
                   }
                 }
               }
+              const fileId = fi.fileName || idx.fileUuid || '';
+              if (!url && idx.fileUuid) url = ntImageUrlFromFileId(idx.fileUuid, isGroup);
               const me: MessageElement = {
-                type: 'image', fileId: fi.fileName ?? '',
+                type: 'image', fileId,
                 fileSize: fi.fileSize ?? 0, width: fi.width ?? 0,
                 height: fi.height ?? 0, imageUrl: url,
               };
@@ -936,18 +957,57 @@ function convertElements(elems: ElemDecoded[]): MessageElement[] {
     }
   }
 
-  return result;
+  return dropLegacyImageSiblings(result);
+}
+
+function isNtImage(element: MessageElement): boolean {
+  if (element.type !== 'image') return false;
+  if (element.picFormat != null || element.sha1Hex) return true;
+  const url = element.imageUrl ?? '';
+  return url.includes('://multimedia.nt.qq.com.cn/');
+}
+
+function isUsableImageUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (parsed.hostname === 'multimedia.nt.qq.com.cn') return parsed.pathname.length > 1;
+  return parsed.pathname.length > 1;
+}
+
+function sameImageFile(left: MessageElement, right: MessageElement): boolean {
+  if (left.type !== 'image' || right.type !== 'image') return false;
+  if (left.fileId && right.fileId && left.fileId === right.fileId) return true;
+  return Boolean(left.md5Hex && right.md5Hex && left.md5Hex === right.md5Hex);
+}
+
+// [#389] NT pictures arrive as CommonElem plus a CustomFace / NotOnlineImage
+// sibling for older clients. QQ shows one picture. Keep the NT image and drop
+// the sibling when it names the same file, or when its URL cannot be fetched.
+function dropLegacyImageSiblings(elements: MessageElement[]): MessageElement[] {
+  const ntImages = elements.filter(isNtImage);
+  return elements.filter((element) => {
+    if (element.type !== 'image') return true;
+    if (isNtImage(element)) return true;
+    const url = element.imageUrl ?? '';
+    if (!url || !isUsableImageUrl(url)) return false;
+    return !ntImages.some((nt) => sameImageFile(nt, element));
+  });
 }
 
 /**
- * Decode the content of a 闪传 richui markdown commonElem (svc=45) into a
- * `flash_file` element. The `MarkdownData.content` is a markdown link
- * `[闪传](mqqapi://markdown/node?nodeType=richui&json=<url-encoded JSON>)`; the
- * JSON's `busId` is `FlashTransfer`. Field NAMES (fileSetId / sceneType /
- * title) were confirmed against QQ NT's flash-transfer manager in
- * wrapper.node.i64; the exact nesting is unknown (the card is built by the
- * sender's client), so we search recursively rather than pin a path. See
- * #199 / #200.
+ * Decode a 闪传 markdown commonElem (svc=45, biz=3) into `flash_file`.
+ *
+ * Current NT (DecodeMarkdownElement + DecodeMdExtInfoFileTransfer, #358):
+ *   extType=1, extInfo.filesetId / name; click scheme also carries
+ *   `mqqrouter://flash_transfer/open_fileset?fileset_id=`.
+ * Older cards (#199/#200): only the richui JSON `data.fileSetId`.
+ * Field names on the JSON card are searched recursively because the
+ * sender builds that blob; extInfo tags are fixed.
  */
 function deepFindValue(obj: unknown, keys: readonly string[], depth = 0): unknown {
   if (depth > 8 || obj === null || typeof obj !== 'object') return undefined;
@@ -963,28 +1023,119 @@ function deepFindValue(obj: unknown, keys: readonly string[], depth = 0): unknow
   return undefined;
 }
 
-function decodeFlashTransferMarkdown(content: string): MessageElement | null {
-  const m = content.match(/[?&]json=([^)\s]+)/);
-  if (!m) return null;
-  let obj: unknown;
+function isFlashTransferMarkdown(md: MarkdownData | null | undefined, content: string): boolean {
+  if (md?.extType === 1 && md.extInfo?.filesetId) return true;
+  return content.includes('FlashTransfer') || content.includes('flash_transfer');
+}
+
+function parseQueryValue(text: string, key: string): string {
+  const m = text.match(new RegExp(`[?&]${key}=([^&\\s"']+)`));
+  if (!m) return '';
   try {
-    obj = JSON.parse(decodeURIComponent(m[1]));
+    return decodeURIComponent(m[1]).trim();
   } catch {
+    return m[1].trim();
+  }
+}
+
+function collectSchemeFields(obj: unknown): { filesetId: string; sceneType: number | undefined } {
+  const schemes: string[] = [];
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > 8 || value == null) return;
+    if (typeof value === 'string') {
+      if (value.includes('fileset_id=') || value.includes('open_fileset')) schemes.push(value);
+      return;
+    }
+    if (typeof value === 'object') {
+      for (const child of Object.values(value as Record<string, unknown>)) walk(child, depth + 1);
+    }
+  };
+  walk(obj, 0);
+  for (const scheme of schemes) {
+    const filesetId = parseQueryValue(scheme, 'fileset_id');
+    if (!filesetId) continue;
+    const rawScene = parseQueryValue(scheme, 'scene_type');
+    const n = Number(rawScene);
+    return {
+      filesetId,
+      sceneType: rawScene && Number.isSafeInteger(n) && n >= 0 ? n : undefined,
+    };
+  }
+  return { filesetId: '', sceneType: undefined };
+}
+
+function parseFlashTransferCard(content: string): {
+  filesetId: string;
+  fileName: string;
+  sceneType: number | undefined;
+} | null {
+  const m = content.match(/[?&]json=([^)\s]+)/);
+  let obj: unknown;
+  let decodedJson = '';
+  if (m) {
+    try {
+      decodedJson = decodeURIComponent(m[1]);
+    } catch {
+      decodedJson = m[1];
+    }
+    try {
+      obj = JSON.parse(decodedJson);
+    } catch {
+      obj = undefined;
+    }
+  }
+
+  const fromKeys = obj
+    ? String(deepFindValue(obj, ['fileSetId', 'filesetId', 'fileset_id', 'file_set_id']) ?? '').trim()
+    : '';
+  const fromScheme = obj ? collectSchemeFields(obj) : { filesetId: '', sceneType: undefined };
+  const fromRaw = {
+    filesetId: parseQueryValue(decodedJson, 'fileset_id'),
+    sceneType: Number(parseQueryValue(decodedJson, 'scene_type')),
+  };
+  const filesetId = fromKeys || fromScheme.filesetId || fromRaw.filesetId;
+  if (!filesetId && obj && deepFindValue(obj, ['busId']) !== 'FlashTransfer' && !content.includes('flash_transfer')) {
     return null;
   }
-  if (deepFindValue(obj, ['busId']) !== 'FlashTransfer') return null;
-  const filesetId = deepFindValue(obj, ['fileSetId', 'filesetId', 'fileset_id', 'file_set_id']);
-  const title = deepFindValue(obj, ['title', 'fileName', 'name']);
-  const sceneType = deepFindValue(obj, ['sceneType', 'scene_type']);
-  const normalizedFilesetId = filesetId != null ? String(filesetId).trim() : '';
-  if (!normalizedFilesetId) return null;
-  const normalizedSceneType = sceneType == null ? 0 : Number(sceneType);
-  if (!Number.isSafeInteger(normalizedSceneType) || normalizedSceneType < 0) return null;
+
+  const title = obj ? deepFindValue(obj, ['title', 'fileName', 'name']) : undefined;
+  const rawScene = obj ? deepFindValue(obj, ['sceneType', 'scene_type']) : undefined;
+  let sceneType: number | undefined;
+  if (rawScene != null && rawScene !== '') {
+    const n = Number(rawScene);
+    if (Number.isSafeInteger(n) && n >= 0) sceneType = n;
+  }
+  if (sceneType == null) sceneType = fromScheme.sceneType;
+  if (sceneType == null && Number.isSafeInteger(fromRaw.sceneType) && fromRaw.sceneType >= 0 && parseQueryValue(decodedJson, 'scene_type')) {
+    sceneType = fromRaw.sceneType;
+  }
+
+  return {
+    filesetId,
+    fileName: title != null ? String(title) : '',
+    sceneType,
+  };
+}
+
+function decodeFlashTransfer(md: MarkdownData): MessageElement | null {
+  const ext = md.extType === 1 ? md.extInfo : undefined;
+  const card = parseFlashTransferCard(md.content ?? '');
+  const filesetId = (ext?.filesetId ?? card?.filesetId ?? '').trim();
+  if (!filesetId) return null;
+
+  let fileName = (ext?.name ?? '').trim();
+  if (!fileName) fileName = (card?.fileName ?? '').trim();
+  if (!fileName && md.summary) {
+    fileName = md.summary.replace(/^\[QQ闪传\]\s*/, '').trim();
+  }
+
+  const thumbUrl = (ext?.thumbnail?.download?.downloadUrl ?? '').trim();
   return {
     type: 'flash_file',
-    filesetId: normalizedFilesetId,
-    fileName: title != null ? String(title) : '',
-    sceneType: normalizedSceneType,
+    filesetId,
+    fileName,
+    sceneType: card?.sceneType ?? 0,
+    ...(thumbUrl ? { thumbUrl } : {}),
   };
 }
 

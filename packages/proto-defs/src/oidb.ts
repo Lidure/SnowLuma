@@ -82,7 +82,10 @@ export interface OidbSvcTrpcTcp0xFE5_2GroupInfo {
   description?:  pb<18, string>;
   question?:     pb<19, string>;
   announcement?: pb<30, string>;
-  shutUpAllTimestamp?: pb<31, uint_32>;
+  // wrapper.node 3.2.32 group_codec.cc DecodeGroupInfo: tag 10 → internal
+  // 60027 (JS groupShutupExpireTime). Tag 31 is 60259, not the mute expire.
+  // 0 = off, 0xFFFFFFFF = permanent, otherwise unix-seconds expire.
+  shutUpAllTimestamp?: pb<10, uint_32>;
 }
 
 export interface OidbSvcTrpcTcp0xFE5_2CustomInfo {
@@ -107,6 +110,9 @@ export interface OidbSvcTrpcTcp0x88D_0Results {
   createTime?:      pb<2, uint_64>;
   maxMemberCount?:  pb<5, uint_64>;
   memberCount?:     pb<6, uint_64>;
+  // DecodeSingleGroupDetailInfoByBaseFilter: tag 7 → 60205 addOption.
+  // SET uses a different message domain (0x89A settings tag 16).
+  addType?:         pb<7, uint_32>;
   level?:           pb<10, uint_64>;
   name?:            pb<15, string>;
   noticePreview?:   pb<16, string>;
@@ -116,11 +122,18 @@ export interface OidbSvcTrpcTcp0x88D_0Results {
   question?:        pb<24, string>;
   answer?:          pb<25, string>;
   maxAdminCount?:   pb<29, uint_64>;
-  shutUpAllTimestamp?: pb<59, uint_32>;
-  /** Complete app privilege bitfield (requested with detail flag tag 99). */
-  privilegeFlag?:   pb<99, uint_32>;
-  /** Complete groupFlagExt4 bitfield (requested with detail flag tag 101). */
+  // wrapper.node 3.2.32 group_info_fetch_codec.cc
+  // DecodeSingleGroupDetailInfoByBaseFilter: tag 45 → internal 60027.
+  // Tag 59 is 60259, not the mute expire. Request mask tag is also 45.
+  shutUpAllTimestamp?: pb<45, uint_32>;
+  /** Complete app privilege bitfield (requested with detail flag tag 56). */
+  privilegeFlag?:   pb<56, uint_32>;
+  /** New-member history-visible switch (0/1; omitted means hidden). */
   groupFlagExt4?:   pb<101, uint_32>;
+  // DecodeSingleGroupDetailInfoByBaseFilter: tag 82 → 60282, tag 83 → 60283.
+  // SET counterparts are 0x89A settings 35/36. 0 = that search mode is open.
+  noFingerOpen?:     pb<82, uint_32>;
+  noCodeFingerOpen?: pb<83, uint_32>;
 }
 export interface OidbSvcTrpcTcp0x88D_0ResponseGroupInfo {
   uin?:     pb<1, uint_64>;
@@ -202,9 +215,10 @@ export interface OidbSvcTrpcTcp0x10C0ResponseRequest {
   group?:        pb<4, OidbSvcTrpcTcp0x10C0ResponseGroup>;
   target?:       pb<5, OidbSvcTrpcTcp0x10C0ResponseUser>;
   invitor?:      pb<6, OidbSvcTrpcTcp0x10C0ResponseUser>;
-  operatorUser?: pb<7, OidbSvcTrpcTcp0x10C0ResponseUser>;
-  field9?:       pb<9, string>;
-  comment?:      pb<10, string>;
+  operatorUser?:     pb<7, OidbSvcTrpcTcp0x10C0ResponseUser>;
+  field9?:           pb<9, string>;
+  comment?:          pb<10, string>;
+  operateTransInfo?: pb<14, bytes>;
 }
 
 export interface OidbSvcTrpcTcp0x10C0Response {
@@ -232,9 +246,10 @@ export interface OidbSvcTrpcTcp0x10C0ResponseRequestByUin {
   group?:        pb<4, OidbSvcTrpcTcp0x10C0ResponseGroup>;
   target?:       pb<5, OidbSvcTrpcTcp0x10C0ResponseUserByUin>;
   invitor?:      pb<6, OidbSvcTrpcTcp0x10C0ResponseUserByUin>;
-  operatorUser?: pb<7, OidbSvcTrpcTcp0x10C0ResponseUserByUin>;
-  field9?:       pb<9, string>;
-  comment?:      pb<10, string>;
+  operatorUser?:     pb<7, OidbSvcTrpcTcp0x10C0ResponseUserByUin>;
+  field9?:           pb<9, string>;
+  comment?:          pb<10, string>;
+  operateTransInfo?: pb<14, bytes>;
 }
 
 export interface OidbSvcTrpcTcp0x10C0ResponseByUin {

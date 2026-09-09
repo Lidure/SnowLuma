@@ -61,6 +61,7 @@ const APIS_ROUTING: Record<string, [string, string]> = {
   setAvatar: ['profile', 'setAvatar'],
   setGroupAvatar: ['profile', 'setGroupAvatar'],
   fetchCustomFace: ['profile', 'fetchCustomFace'],
+  fetchCustomFaceIds: ['profile', 'fetchCustomFaceIds'],
   fetchCustomFaceDetails: ['profile', 'fetchCustomFaceDetails'],
   getProfileLike: ['profile', 'getLike'],
   getUnidirectionalFriendList: ['profile', 'getUnidirectionalFriendList'],
@@ -147,6 +148,50 @@ function fakeEssenceMessage(
     ...overrides,
   };
 }
+
+describe('extended-actions / send_forward_msg', () => {
+  it('treats group_id 0 as unused', async () => {
+    const sendForwardMsg = vi.fn(async () => ({ forwardId: 'fwd' }));
+    const ctx = fakeCtx(fakeBridge(), { sendForwardMsg });
+    const response = await makeHandler(ctx).handle('send_forward_msg', {
+      messages: 'hi',
+      group_id: 0,
+    });
+    expect(response).toMatchObject({ status: 'ok', retcode: 0 });
+    expect(sendForwardMsg).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a non-numeric group_id instead of treating it as 0', async () => {
+    const sendForwardMsg = vi.fn();
+    const ctx = fakeCtx(fakeBridge(), { sendForwardMsg });
+    const response = await makeHandler(ctx).handle('send_forward_msg', {
+      messages: 'hi',
+      group_id: 'nope',
+    });
+    expect(response).toMatchObject({ status: 'failed', retcode: 1400 });
+    expect(sendForwardMsg).not.toHaveBeenCalled();
+  });
+});
+
+describe('extended-actions / get_forward_msg', () => {
+  it('uses a string message_id as the forward id', async () => {
+    const getForwardMsg = vi.fn(async () => []);
+    const ctx = fakeCtx(fakeBridge(), { getForwardMsg });
+    const response = await makeHandler(ctx).handle('get_forward_msg', { message_id: 'resid-1' });
+    expect(getForwardMsg).toHaveBeenCalledWith('resid-1');
+    expect(response).toMatchObject({ status: 'ok' });
+  });
+});
+
+describe('extended-actions / fetch_ptt_text', () => {
+  it('accepts a numeric message_id', async () => {
+    const fetchPttText = vi.fn(async () => 'hello');
+    const ctx = fakeCtx(fakeBridge(), { fetchPttText });
+    const response = await makeHandler(ctx).handle('fetch_ptt_text', { message_id: 12 });
+    expect(fetchPttText).toHaveBeenCalledWith(12);
+    expect(response).toMatchObject({ status: 'ok', data: 'hello' });
+  });
+});
 
 describe('extended-actions / set_self_longnick', () => {
   it('accepts an empty longNick to clear the signature', async () => {
@@ -1486,6 +1531,45 @@ describe('extended-actions / set_group_portrait', () => {
   });
 });
 
+describe('extended-actions / fetch_custom_face', () => {
+  it('return_type=id uses the id list directly', async () => {
+    const fetchCustomFaceIds = vi.fn(async () => [
+      '10001_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0',
+      '10001_0_0_0_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB_0_0',
+    ]);
+    const fetchCustomFace = vi.fn();
+    const bridge = fakeBridge({ fetchCustomFaceIds, fetchCustomFace });
+
+    const response = await makeHandler(fakeCtx(bridge)).handle('fetch_custom_face', {
+      count: '2',
+      return_type: 'id',
+    });
+
+    expect(fetchCustomFaceIds).toHaveBeenCalledWith(2);
+    expect(fetchCustomFace).not.toHaveBeenCalled();
+    expect(response).toMatchObject({
+      status: 'ok',
+      data: [
+        '10001_0_0_0_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_0_0',
+        '10001_0_0_0_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB_0_0',
+      ],
+    });
+  });
+
+  it('default return_type uses image urls', async () => {
+    const url = 'https://p.qpic.cn/qq_expression/10001/id/0';
+    const fetchCustomFace = vi.fn(async () => [url]);
+    const fetchCustomFaceIds = vi.fn();
+    const bridge = fakeBridge({ fetchCustomFace, fetchCustomFaceIds });
+
+    const response = await makeHandler(fakeCtx(bridge)).handle('fetch_custom_face', { count: '1' });
+
+    expect(fetchCustomFace).toHaveBeenCalledWith(1);
+    expect(fetchCustomFaceIds).not.toHaveBeenCalled();
+    expect(response).toMatchObject({ status: 'ok', data: [url] });
+  });
+});
+
 describe('extended-actions / fetch_custom_face_detail', () => {
   it('returns real packet-backed fields with SnowLuma and NapCat resource aliases', async () => {
     const fetchCustomFaceDetails = vi.fn(async () => [{
@@ -2027,7 +2111,10 @@ describe('extended-actions / TierB ③ share + doubt + robot-option', () => {
   });
 
   it('get_doubt_friends_add_request returns the mapped list', async () => {
-    const list = [{ uid: 'u1', nick: 'A', source: 's', msg: 'm', reqTime: 123 }];
+    const list = [{
+      uid: 'u1', user_id: 10001, nick: 'A', source: 's', reason: '',
+      msg: 'm', group_code: '', reqTime: 123,
+    }];
     const getDoubtRequests = vi.fn(async () => list);
     const bridge = fakeBridge({ apis: { friend: { getDoubtRequests } } });
     const res = await makeHandler(fakeCtx(bridge)).handle('get_doubt_friends_add_request', { count: 5 });
@@ -2059,6 +2146,84 @@ describe('extended-actions / TierB ③ share + doubt + robot-option', () => {
     const res = await makeHandler(fakeCtx(bridge)).handle('set_group_robot_add_option', { group_id: 12345, robot_member_switch: 1, robot_member_examine: 2 });
     expect(setRobotAddOption).toHaveBeenCalledWith(12345, 1, 2);
     expect(res).toMatchObject({ status: 'ok' });
+  });
+});
+
+// ─── TierB ③: send_ark (图文 Ark 卡片, OIDB 0xdc2_34) ───
+
+describe('extended-actions / send_tuwen_ark', () => {
+  const arkParams = {
+    title: '标题',
+    desc: '描述',
+    jump_url: 'https://example.com',
+  };
+
+  it('routes to group when group_id is given (peerType=1)', async () => {
+    const sendTuwenArk = vi.fn(async () => {});
+    const bridge = fakeBridge({ apis: { contacts: { sendTuwenArk } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('send_tuwen_ark', {
+      group_id: 12345,
+      ...arkParams,
+    });
+    expect(res).toMatchObject({ status: 'ok', retcode: 0, data: null });
+    expect(sendTuwenArk).toHaveBeenCalledWith({
+      targetId: 12345,
+      peerType: 1,
+      title: '标题',
+      desc: '描述',
+      summary: '[分享]',
+      previewUrl: 'https://tangram-1251316161.file.myqcloud.com/files/20210721/e50a8e37e08f29bf1ffc7466e1950690.png',
+      jumpUrl: 'https://example.com',
+    });
+  });
+
+  it('routes to C2C when user_id is given (peerType=0)', async () => {
+    const sendTuwenArk = vi.fn(async () => {});
+    const bridge = fakeBridge({ apis: { contacts: { sendTuwenArk } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('send_tuwen_ark', {
+      user_id: 10001,
+      ...arkParams,
+    });
+    expect(res).toMatchObject({ status: 'ok', retcode: 0, data: null });
+    expect(sendTuwenArk).toHaveBeenCalledWith({
+      targetId: 10001,
+      peerType: 0,
+      title: '标题',
+      desc: '描述',
+      summary: '[分享]',
+      previewUrl: 'https://tangram-1251316161.file.myqcloud.com/files/20210721/e50a8e37e08f29bf1ffc7466e1950690.png',
+      jumpUrl: 'https://example.com',
+    });
+  });
+
+  it('prefers group_id over user_id when both are supplied', async () => {
+    const sendTuwenArk = vi.fn(async () => {});
+    const bridge = fakeBridge({ apis: { contacts: { sendTuwenArk } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('send_tuwen_ark', {
+      group_id: 12345,
+      user_id: 10001,
+      ...arkParams,
+    });
+    expect(res).toMatchObject({ status: 'ok' });
+    expect(sendTuwenArk).toHaveBeenCalledWith(expect.objectContaining({ peerType: 1, targetId: 12345 }));
+  });
+
+  it('rejects when neither user_id nor group_id is given', async () => {
+    const sendTuwenArk = vi.fn();
+    const bridge = fakeBridge({ apis: { contacts: { sendTuwenArk } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('send_tuwen_ark', { ...arkParams });
+    expect(res).toMatchObject({ status: 'failed', retcode: 1400 });
+    expect(sendTuwenArk).not.toHaveBeenCalled();
+  });
+
+  it('surfaces bridge errors as action_failed', async () => {
+    const sendTuwenArk = vi.fn(async () => { throw new Error('oidb 0xdc2 rejected'); });
+    const bridge = fakeBridge({ apis: { contacts: { sendTuwenArk } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('send_tuwen_ark', {
+      group_id: 12345,
+      ...arkParams,
+    });
+    expect(res).toMatchObject({ status: 'failed', retcode: 100, wording: 'oidb 0xdc2 rejected' });
   });
 });
 
@@ -2207,5 +2372,48 @@ describe('extended-actions / get_fileset_id', () => {
     const bridge = fakeBridge({ apis: { flashTransfer: { getFilesetIdByCode: getFilesetIdByCode as any } } });
     const res = await makeHandler(fakeCtx(bridge)).handle('get_fileset_id', { share_code: 'invalid' });
     expect(res).toMatchObject({ status: 'failed', retcode: 100 });
+  });
+});
+
+describe('extended-actions / create_flash_task (#361)', () => {
+  it('accepts a path string', async () => {
+    const createFlashTask = vi.fn(async () => ({ filesetId: 'fs-1' }));
+    const bridge = fakeBridge({ apis: { flashTransfer: { createFlashTask } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('create_flash_task', { files: '/tmp/a.pdf' });
+    expect(res).toMatchObject({ status: 'ok', data: { fileset_id: 'fs-1', task_id: 'fs-1' } });
+    expect(createFlashTask).toHaveBeenCalledWith([{ file: '/tmp/a.pdf' }], undefined, undefined);
+  });
+
+  it('accepts { file, name } and forwards the per-file name', async () => {
+    const createFlashTask = vi.fn(async () => ({ filesetId: 'fs-2' }));
+    const bridge = fakeBridge({ apis: { flashTransfer: { createFlashTask } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('create_flash_task', {
+      files: { file: '/tmp/uuid__a.pdf', name: 'a.pdf' },
+      name: '卡片',
+    });
+    expect(res.status).toBe('ok');
+    expect(createFlashTask).toHaveBeenCalledWith(
+      [{ file: '/tmp/uuid__a.pdf', name: 'a.pdf' }],
+      '卡片',
+      undefined,
+    );
+  });
+
+  it('rejects an empty files value', async () => {
+    const createFlashTask = vi.fn(async () => ({ filesetId: 'fs' }));
+    const bridge = fakeBridge({ apis: { flashTransfer: { createFlashTask } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('create_flash_task', { files: [] });
+    expect(res).toMatchObject({ status: 'failed', retcode: 1400, wording: 'files must not be empty' });
+    expect(createFlashTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-string per-file name', async () => {
+    const createFlashTask = vi.fn(async () => ({ filesetId: 'fs' }));
+    const bridge = fakeBridge({ apis: { flashTransfer: { createFlashTask } } });
+    const res = await makeHandler(fakeCtx(bridge)).handle('create_flash_task', {
+      files: { file: '/tmp/a.pdf', name: 1 },
+    });
+    expect(res).toMatchObject({ status: 'failed', retcode: 1400, wording: 'files[].name must be a string' });
+    expect(createFlashTask).not.toHaveBeenCalled();
   });
 });

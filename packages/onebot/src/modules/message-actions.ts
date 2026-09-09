@@ -2,6 +2,7 @@ import { createLogger } from '@snowluma/common/logger';
 import type { BridgeInterface } from '@snowluma/core/bridge-interface';
 import type { ForwardNodePayload, FriendMessage, GroupMessage, MessageElement, MessageElementOf, QQEventVariant } from '@snowluma/protocol/events';
 import { getVideoSourceSize, MAX_VIDEO_SIZE } from '@snowluma/protocol/highway/video-upload';
+import { guessFileNameFromUrl } from '@snowluma/protocol/highway/utils';
 import type { MessageSendResult } from '../api-handler';
 import { convertEvent, elementsToOneBotSegments, type ConverterContext } from '../event-converter';
 import { segmentsToRawMessage } from '../helper/cq';
@@ -14,6 +15,7 @@ import {
 } from '../message-id';
 import {
   assertOutboundMessageInput,
+  exclusiveForwardNodeList,
   MessageElementValidationError,
   parseMessage,
 } from '../message-parser';
@@ -455,10 +457,7 @@ export async function backfillReplyTarget(ref: HistoryRef, event: QQEventVariant
   if (reply?.replyElements?.length) {
     try {
       const segments = await elementsToOneBotSegments(
-        reply.replyElements, isGroup, session,
-        ref.converterCtx.imageUrlResolver, ref.converterCtx.mediaUrlResolver,
-        ref.converterCtx.messageIdResolver, ref.converterCtx.mediaSegmentSink,
-        ref.selfId,
+        ref.converterCtx, reply.replyElements, isGroup, session,
       ) as JsonArray;
       const fallback = buildBackfillEvent(targetId, replySeq, quotedSender,
         reply.replyTime ?? 0, segments, ref.selfId, isGroup, session);
@@ -701,14 +700,16 @@ async function cacheSelfSentMessage(
     // means /get_msg returns the segment with the original `file` path
     // and an empty `url`, which is what Lagrange does too.
     const segments = await elementsToOneBotSegments(
+      {
+        selfId: ref.selfId,
+        imageUrlResolver: null,
+        mediaUrlResolver: null,
+        messageIdResolver: null,
+        mediaSegmentSink: null,
+      },
       elements,
       isGroup,
       sessionId,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      ref.selfId,
     ) as JsonArray;
     const raw = segmentsToRawMessage(segments);
     const selfId = ref.selfId;
@@ -802,6 +803,17 @@ export async function sendPrivateMessage(
     autoEscape,
     tempGroupId === undefined ? 'direct-private' : 'group-temp',
   );
+  const privateForwardNodes = exclusiveForwardNodeList(message, autoEscape);
+  if (privateForwardNodes) {
+    if (tempGroupId !== undefined) {
+      throw new MessageElementValidationError(
+        'UNSENDABLE_TYPE',
+        'message segment "node" cannot be sent in a temp session',
+        'node',
+      );
+    }
+    return sendPrivateForwardMessage(ref, userId, privateForwardNodes, undefined, onSelfSent);
+  }
   const elements = await parseMessage(message, autoEscape, {
     resolveReplySequence: (replyMessageId) => {
       return ref.messageStore.resolveReplySequence(false, userId, replyMessageId);
@@ -978,7 +990,7 @@ export async function sendPrivateMessage(
     const userUid = await ensureFileTargetUid();
     for (const fileEl of allFileElements) {
       if (fileEl.url && !fileEl.fileId) {
-        const name = fileEl.fileName || fileEl.url.split('/').pop() || 'file';
+        const name = fileEl.fileName || guessFileNameFromUrl(fileEl.url) || 'file';
         // Upload and publish are separate here so the Action keeps the real
         // PbSendMsg receipt. Letting uploadPrivate publish internally discards
         // that receipt, which makes a reliable message_sent event impossible
@@ -1035,6 +1047,11 @@ export async function sendGroupMessage(
   autoEscape: boolean,
 ): Promise<MessageSendResult> {
   assertOutboundMessageInput(message, autoEscape, 'group');
+  const groupForwardNodes = exclusiveForwardNodeList(message, autoEscape);
+  if (groupForwardNodes) {
+    const result = await sendGroupForwardMessage(ref, groupId, groupForwardNodes);
+    return { messageId: result.messageId };
+  }
   const elements = await parseMessage(message, autoEscape, {
     resolveReplySequence: (replyMessageId) => {
       return ref.messageStore.resolveReplySequence(true, groupId, replyMessageId);
@@ -1109,7 +1126,7 @@ export async function sendGroupMessage(
     let fileId: string;
     if (fileEl.url && !fileEl.fileId) {
       // upload() already calls publish() internally — do NOT call publish() again.
-      const name = fileEl.fileName || fileEl.url.split('/').pop() || 'file';
+      const name = fileEl.fileName || guessFileNameFromUrl(fileEl.url) || 'file';
       const result = await ref.bridge.apis.groupFile.upload(groupId, fileEl.url, name, '/', true);
       fileId = result.fileId ?? '';
       if (!fileId) throw new Error('group file auto-upload returned no file_id');
@@ -1362,9 +1379,7 @@ export async function getForwardMessage(
     // exactly issue #74 (`/get_forward_msg` image url 缺少 rkey). Image rkey
     // re-signing is scene-aware via the appid in the URL (see instance-rkey).
     const segments = await elementsToOneBotSegments(
-      node.elements, isGroup, sessionId,
-      ref.converterCtx.imageUrlResolver,
-      ref.converterCtx.mediaUrlResolver,
+      ref.converterCtx, node.elements, isGroup, sessionId,
     );
 
     const sender: JsonObject = {
@@ -1678,7 +1693,7 @@ async function parseForwardNodes(
 
       const eventSender = asJsonObject(event.sender) ?? {};
       const senderCard = eventSender.card !== undefined ? String(eventSender.card) : undefined;
-      const nickname = String(eventSender.card ?? eventSender.nickname ?? nodeData.nickname ?? nodeData.name ?? '');
+      const nickname = String(eventSender.card || eventSender.nickname || nodeData.nickname || nodeData.name || '');
       const userUin = toPositiveInt(event.user_id);
       if (userUin <= 0) {
         throw new MessageElementValidationError(

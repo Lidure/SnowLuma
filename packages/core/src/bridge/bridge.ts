@@ -52,21 +52,17 @@ export class Bridge implements BridgeInterface {
     this.apis = buildApiHub(this);
     this.identity.setFetcher({
       fetchProfile: (uin) => this.apis.contacts.fetchUserProfile(uin),
+      fetchProfileByUid: (uid) => this.apis.contacts.fetchUserProfileByUid(uid),
       fetchGroupMemberList: (gid) => this.apis.contacts.fetchGroupMemberList(gid),
     });
     this.pipeline = new IncomingPacketPipeline({
       identity: this.identity,
       events: this.events,
-      refreshMemberCache: (groupId, refreshGroupList, forceMemberList) =>
-        this.refreshMemberCache(groupId, refreshGroupList, forceMemberList),
-      resolveStrangerProfile: async (uid) => {
-        try {
-          const p = await this.apis.contacts.fetchUserProfileByUid(uid);
-          if (p.uin <= 0) return null;
-          return { uin: p.uin, nickname: p.nickname };
-        } catch {
-          return null;
-        }
+      fetchGroupList: async () => {
+        await this.apis.contacts.fetchGroupList();
+      },
+      fetchGroupMemberList: async (groupId) => {
+        await this.apis.contacts.fetchGroupMemberList(groupId);
       },
       resolveGroupJoinRequest: async (groupId, uid, subType) => {
         const [main, filtered] = await Promise.allSettled([
@@ -88,10 +84,14 @@ export class Bridge implements BridgeInterface {
           ...(main.status === 'fulfilled' ? main.value : []),
           ...(filtered.status === 'fulfilled' ? filtered.value : []),
         ];
-        return requests.find(r => {
+        const matches = requests.filter((r) => {
           if (r.groupId !== groupId) return false;
           return subType === 'invite' ? r.invitorUid === uid : r.targetUid === uid;
-        }) ?? null;
+        });
+        if (subType === 'invite') {
+          return matches.find((r) => r.notifyType === 1) ?? matches[0] ?? null;
+        }
+        return matches.find((r) => r.notifyType === 7) ?? matches[0] ?? null;
       },
       resolveGroupInviteCardSequence: async (groupId) => {
         const deadline = Date.now() + 1_000;
@@ -101,6 +101,9 @@ export class Bridge implements BridgeInterface {
           await new Promise(resolve => setTimeout(resolve, 25));
         } while (Date.now() < deadline);
         return null;
+      },
+      rememberGroupInviteCardSequence: (groupUin, sequence) => {
+        this.apis.contacts.rememberGroupInviteCardSequence(groupUin, sequence);
       },
     });
     this.pipeline.registerCmd(
@@ -245,14 +248,6 @@ export class Bridge implements BridgeInterface {
     return this.pipeline.process(pkt);
   }
 
-  private async refreshMemberCache(groupId: number, refreshGroupList: boolean, forceMemberList: boolean): Promise<boolean> {
-    if (refreshGroupList) {
-      try { await this.apis.contacts.fetchGroupList(); } catch { /* ignore */ }
-    }
-    if (!this.identity.findGroup(groupId)) return false;
-    await this.apis.contacts.fetchGroupMemberList(groupId, { force: forceMemberList });
-    return true;
-  }
   rememberUploadedFile(meta: UploadedFileMeta): void {
     if (!meta.fileId) return;
     if (this.uploadedFileMeta_.size >= Bridge.UPLOADED_FILE_CACHE_MAX) {

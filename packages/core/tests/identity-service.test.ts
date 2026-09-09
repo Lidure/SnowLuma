@@ -589,6 +589,23 @@ describe('IdentityService', () => {
         lastError: expect.stringMatching(/locked/i),
         lastFailureAt: suspendedFailureAt,
       });
+      const skipLogsBeforeBurst = seen.filter((entry) =>
+        /persistence write skipped/.test(entry.message),
+      ).length;
+      expect(skipLogsBeforeBurst).toBe(1);
+      for (let i = 0; i < 50; i += 1) {
+        identity.rememberRequestIdentity({
+          uid: `u_skip_burst_${i}`,
+          uin: 500_000 + i,
+        });
+      }
+      expect(seen.filter((entry) => /persistence write skipped/.test(entry.message)))
+        .toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      identity.rememberRequestIdentity({ uid: 'u_skip_after_minute', uin: 600_000 });
+      const skipLogs = seen.filter((entry) => /persistence write skipped/.test(entry.message));
+      expect(skipLogs).toHaveLength(2);
+      expect(skipLogs[1]?.message).toMatch(/suppressed=50/);
 
       releaseLock();
       identity.close();
@@ -757,6 +774,9 @@ describe('IdentityService', () => {
       sign: '',
       avatar: '',
       level: 0,
+      qidianMasterFlag: 0,
+      qidianCrewFlag: 0,
+      qidianCrewFlag2: 0,
     };
     const request = {
       groupId: GROUP_ID,
@@ -786,10 +806,10 @@ describe('IdentityService', () => {
       ['forget group', () => identity.forgetGroup(GROUP_ID)],
       ['group members', () => identity.rememberGroupMembers(GROUP_ID, [])],
       ['user profile', () => identity.rememberUserProfile(profile)],
-      ['group invite sequence', () => identity.rememberGroupInviteCardSequence(GROUP_ID, 123)],
       ['group requests', () => identity.rememberGroupRequests([request])],
       ['request identity', () => identity.rememberRequestIdentity({ uid: 'u_request', uin: 88888 })],
       ['group member identity', () => identity.rememberGroupMemberIdentity(GROUP_ID, { uid: 'u_new', uin: 99999 })],
+      ['group member joined', () => identity.rememberGroupMemberJoined(GROUP_ID, { uid: 'u_new', uin: 99999 })],
       ['group member inactive', () => identity.markGroupMemberInactive(GROUP_ID, { uid: member.uid, uin: member.uin })],
     ];
 
@@ -802,6 +822,73 @@ describe('IdentityService', () => {
     expect(identity.findGroupMember(GROUP_ID, member.uin)?.card).toBe('before-close');
     expect(identity.findFriend(22222)).toBeNull();
     expect(identity.findUinByUid('u_request')).toBeNull();
+  });
+
+  it('does not treat identity-only sightings as live group members', () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    identity.rememberGroups([makeGroup()]);
+    identity.rememberGroupMemberIdentity(GROUP_ID, { uid: 'u_seen', uin: 88888 });
+
+    expect(identity.findGroupMember(GROUP_ID, 88888)).toBeNull();
+    expect(identity.findUinByUid('u_seen')).toBe(88888);
+    identity.close();
+  });
+
+  it('records a thin live member on join without inventing roster details', () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    identity.rememberGroups([makeGroup()]);
+    const existing = makeMember(33333, 'u_existing', 'card');
+    identity.rememberGroupMembers(GROUP_ID, [existing]);
+
+    identity.rememberGroupMemberJoined(GROUP_ID, { uid: 'u_join', uin: 44444 });
+    identity.rememberGroupMemberJoined(GROUP_ID, { uid: 'u_join', uin: 44444 });
+    identity.rememberGroupMemberJoined(GROUP_ID, { uid: 'u_ignored', uin: 0 });
+
+    const joined = identity.findGroupMember(GROUP_ID, 44444);
+    expect(joined).toMatchObject({
+      uin: 44444,
+      uid: 'u_join',
+      nickname: '',
+      card: '',
+      role: 'member',
+    });
+    expect(joined?.isRobot).toBeUndefined();
+    expect(identity.findGroupMember(GROUP_ID, 33333)?.card).toBe('card');
+    identity.close();
+  });
+
+  it('drops a leaver from the live roster and keeps their identity mapping', () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    identity.rememberGroups([makeGroup()]);
+    const member = makeMember(33333, 'u_member', 'card');
+    identity.rememberGroupMembers(GROUP_ID, [member]);
+
+    identity.markGroupMemberInactive(GROUP_ID, { uid: member.uid, uin: member.uin });
+
+    expect(identity.findGroupMember(GROUP_ID, member.uin)).toBeNull();
+    expect(identity.findUidByUin(member.uin, GROUP_ID)).toBe(member.uid);
+    identity.close();
+  });
+
+  it('keeps a leaver out of the live roster after reopen', () => {
+    const dbPath = tempDbPath('leave-live-roster');
+    const member = makeMember(33333, 'u_member', 'card');
+
+    {
+      const identity = new IdentityService(SELF_UIN, dbPath);
+      identity.rememberGroups([makeGroup()]);
+      identity.rememberGroupMembers(GROUP_ID, [member]);
+      identity.markGroupMemberInactive(GROUP_ID, { uid: member.uid, uin: member.uin });
+      expect(identity.findGroupMember(GROUP_ID, member.uin)).toBeNull();
+      identity.close();
+    }
+
+    {
+      const identity = new IdentityService(SELF_UIN, dbPath);
+      expect(identity.findGroupMember(GROUP_ID, member.uin)).toBeNull();
+      expect(identity.findUidByUin(member.uin, GROUP_ID)).toBe(member.uid);
+      identity.close();
+    }
   });
 
   it('marks missing members inactive only after a successful full refresh', () => {
@@ -912,7 +999,10 @@ describe('IdentityService', () => {
 
 describe('IdentityService.resolveUid', () => {
   function makeProfile(uin: number, uid: string): UserProfileInfo {
-    return { uin, uid, nickname: '', remark: '', qid: '', sex: 'unknown', age: 0, sign: '', avatar: '', level: 0 };
+    return {
+      uin, uid, nickname: '', remark: '', qid: '', sex: 'unknown', age: 0, sign: '', avatar: '', level: 0,
+      qidianMasterFlag: 0, qidianCrewFlag: 0, qidianCrewFlag2: 0,
+    };
   }
 
   it('returns the cached uid without invoking the fetcher', async () => {
@@ -972,5 +1062,151 @@ describe('IdentityService.resolveUid', () => {
 
     await expect(identity.resolveUid(0)).rejects.toThrow(/invalid uin/);
     expect(fetchProfile).not.toHaveBeenCalled();
+  });
+});
+
+describe('IdentityService inbound UID→UIN', () => {
+  function makeProfile(uin: number, uid: string): UserProfileInfo {
+    return {
+      uin, uid, nickname: '', remark: '', qid: '', sex: 'unknown', age: 0, sign: '', avatar: '', level: 0,
+      qidianMasterFlag: 0, qidianCrewFlag: 0, qidianCrewFlag2: 0,
+    };
+  }
+
+  it('findUinByUid treats a numeric uid as that uin without consulting maps', () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    identity.rememberRequestIdentity({ uid: '22999', uin: 11111 });
+    expect(identity.findUinByUid('22999')).toBe(22999);
+    expect(identity.findUinByUid('0')).toBeNull();
+    expect(identity.findUinByUid('')).toBeNull();
+  });
+
+  it('returns the cached uin without invoking fetchProfileByUid', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    identity.rememberRequestIdentity({ uid: 'u_known', uin: 12345 });
+    const fetchProfileByUid = vi.fn(async () => makeProfile(999, 'should-not-be-used'));
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid,
+    });
+
+    await expect(identity.resolveUin('u_known')).resolves.toBe(12345);
+    expect(fetchProfileByUid).not.toHaveBeenCalled();
+  });
+
+  it('does not call fetchProfileByUid for a numeric uid', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    const fetchProfileByUid = vi.fn(async () => makeProfile(1, '1'));
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid,
+    });
+
+    await expect(identity.resolveUin('22999')).resolves.toBe(22999);
+    expect(fetchProfileByUid).not.toHaveBeenCalled();
+  });
+
+  it('falls back to fetchProfileByUid on miss and returns the profile uin', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    const fetchProfileByUid = vi.fn(async (uid: string) => {
+      identity.rememberUserProfile(makeProfile(88888, uid));
+      return makeProfile(88888, uid);
+    });
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid,
+    });
+
+    await expect(identity.resolveUin('u_stranger')).resolves.toBe(88888);
+    expect(fetchProfileByUid).toHaveBeenCalledWith('u_stranger');
+  });
+
+  it('returns the profile uin even when the fetcher forgets to remember', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid: async () => makeProfile(77777, 'u_forgetful'),
+    });
+
+    await expect(identity.resolveUin('u_forgetful')).resolves.toBe(77777);
+  });
+
+  it('does not pull a group member list even when groupId is provided', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    const fetchGroupMemberList = vi.fn(async () => []);
+    const fetchProfileByUid = vi.fn(async () => makeProfile(66666, 'u_invitee'));
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid,
+      fetchGroupMemberList,
+    });
+
+    await expect(identity.resolveUin('u_invitee', GROUP_ID)).resolves.toBe(66666);
+    expect(fetchGroupMemberList).not.toHaveBeenCalled();
+    expect(fetchProfileByUid).toHaveBeenCalledWith('u_invitee');
+  });
+
+  it('does not pull a group member list when the inbound fetcher is absent', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    const fetchGroupMemberList = vi.fn(async () => []);
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchGroupMemberList,
+    });
+
+    await expect(identity.resolveUin('u_none', GROUP_ID)).resolves.toBeNull();
+    expect(fetchGroupMemberList).not.toHaveBeenCalled();
+  });
+
+  it('uses a mapping remembered before the inbound fetcher throws', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid: async (uid: string) => {
+        identity.rememberUserProfile(makeProfile(55555, uid));
+        throw new Error('transport reset after remember');
+      },
+    });
+
+    await expect(identity.resolveUin('u_remembered')).resolves.toBe(55555);
+  });
+
+  it('returns null on miss, fetcher error, empty profile, or missing inbound fetcher', async () => {
+    const identity = IdentityService.memory(SELF_UIN);
+
+    await expect(identity.resolveUin('u_none')).resolves.toBeNull();
+
+    identity.setFetcher({ fetchProfile: async () => makeProfile(0, '') });
+    await expect(identity.resolveUin('u_none')).resolves.toBeNull();
+
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid: async () => makeProfile(0, 'u_none'),
+    });
+    await expect(identity.resolveUin('u_none')).resolves.toBeNull();
+
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid: async () => {
+        throw new Error('oidb down');
+      },
+    });
+    await expect(identity.resolveUin('u_none')).resolves.toBeNull();
+  });
+
+  it('does not enter Identity degraded when the inbound fetcher throws', async () => {
+    const dbPath = tempDbPath('inbound-fetch-throw');
+    const identity = new IdentityService(SELF_UIN, dbPath);
+    identity.setFetcher({
+      fetchProfile: async () => makeProfile(0, ''),
+      fetchProfileByUid: async () => {
+        throw new Error('oidb down');
+      },
+    });
+
+    await expect(identity.resolveUin('u_none')).resolves.toBeNull();
+    expect(identity.persistenceStatus.state).toBe('healthy');
+    expect(identity.persistenceStatus.pendingWrites).toBe(0);
+    identity.close();
   });
 });

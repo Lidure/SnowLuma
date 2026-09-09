@@ -1,13 +1,13 @@
 import { mapWithConcurrency } from '@snowluma/common/concurrency';
 import { createLogger } from '@snowluma/common/logger';
 import type { BridgeInterface } from '@snowluma/core/bridge-interface';
-import type { IdentityService } from '@snowluma/protocol/identity-service';
 import {
   formatGroupRequestFlag,
   type GroupMemberInfo,
   type GroupRequestInfo,
   type UserProfileInfo,
 } from '@snowluma/protocol/qq-info';
+import type { QidianCorpInfo } from '@snowluma/protocol/services/qidian/fetch-corp-info';
 import type { OneBotInstanceContext } from '../instance-context';
 import type { JsonObject } from '../types';
 
@@ -211,12 +211,12 @@ export async function getGroupMemberList(
 ): Promise<JsonObject[]> {
   if (noCache) {
     const members = await fetchSingleGroupMembers(bridge, groupId, true);
-    return members.map(m => formatGroupMember(groupId, m));
+    return members.map(m => formatGroupMember(groupId, m, cachedQidianProfile(bridge, m.uin)));
   }
 
   try {
     const members = await bridge.apis.contacts.fetchGroupMemberList(groupId);
-    return members.map(m => formatGroupMember(groupId, m));
+    return members.map(m => formatGroupMember(groupId, m, cachedQidianProfile(bridge, m.uin)));
   } catch (err) {
     log.warn(
       'group member fetch failed, using classified cache: uin=%s group=%d err=%s',
@@ -224,7 +224,7 @@ export async function getGroupMemberList(
       groupId,
       err instanceof Error ? (err.stack ?? err.message) : String(err),
     );
-    const cached = getCachedGroupMembers(bridge.identity, groupId);
+    const cached = getCachedGroupMembers(bridge, groupId);
     if (cached.length === 0) throw err;
     return cached;
   }
@@ -242,7 +242,17 @@ export async function getGroupMemberInfo(
   }
   const m = bridge.identity.findGroupMember(groupId, userId);
   if (!m) return null;
-  return formatGroupMember(groupId, m);
+  // 企点标志（#404 后续 PR）：优先读身份缓存，无缓存时再按需拉取一次用户资料。
+  // 均为 best-effort —— 失败时回退为 0，不影响成员信息主流程。
+  let profile = cachedQidianProfile(bridge, userId);
+  if (!profile) {
+    try {
+      profile = await bridge.apis.contacts.fetchUserProfile(userId);
+    } catch {
+      // profile enrichment is best-effort; fall back to all-zero flags
+    }
+  }
+  return formatGroupMember(groupId, m, profile ?? undefined);
 }
 
 export async function getGroupFiles(
@@ -280,35 +290,61 @@ export async function getGroupFiles(
   };
 }
 
+function formatStrangerInfo(p: UserProfileInfo, corp?: QidianCorpInfo | null): JsonObject {
+  return {
+    user_id: p.uin,
+    nickname: p.nickname,
+    remark: p.remark,
+    sex: p.sex,
+    age: p.age,
+    long_nick: p.sign,
+    qq_level: p.level,
+    level: p.level,
+    status: p.status ?? 0,
+    extStatus: p.extStatus ?? 0,
+    ext_status: p.extStatus ?? 0,
+    batteryStatus: p.batteryStatus ?? 0,
+    customStatus: p.customStatus ?? null,
+    customStatusDescInfo: p.customStatusDesc ?? '',
+    qidian_master_flag: p.qidianMasterFlag ?? 0,
+    qidian_crew_flag: p.qidianCrewFlag ?? 0,
+    qidian_crew_flag_2: p.qidianCrewFlag2 ?? 0,
+    // #404 后续 PR：企点企业资料卡。企业资料卡不含独立的企业 ID，
+    // 因此这里只透出企业名称（SsoCorpInfo.corpName）。
+    qidian_enterprise_name: corp?.name ?? '',
+  };
+}
+
+/** 命中的是企点账号时才去拉一次企业资料卡（best-effort，失败返回 null）。 */
+async function strangerCorpInfo(
+  bridge: BridgeInterface,
+  p: UserProfileInfo,
+): Promise<QidianCorpInfo | null> {
+  if (p.qidianMasterFlag === 0 && p.qidianCrewFlag === 0) return null;
+  try {
+    return await bridge.apis.contacts.fetchQidianCorpInfo(p.uin);
+  } catch {
+    return null;
+  }
+}
+
 export async function getStrangerInfo(
   bridge: BridgeInterface,
   userId: number,
 ): Promise<JsonObject | null> {
   try {
     const p = await bridge.apis.contacts.fetchUserProfile(userId);
-    return {
-      user_id: p.uin,
-      nickname: p.nickname,
-      remark: p.remark,
-      sex: p.sex,
-      age: p.age,
-      long_nick: p.sign,
-      qq_level: p.level,
-      level: p.level,
-    };
+    const corp = await strangerCorpInfo(bridge, p);
+    return formatStrangerInfo(p, corp);
   } catch {
     const p = bridge.identity.findUserProfile(userId);
     if (p) {
-      return {
-        user_id: p.uin,
-        nickname: p.nickname,
+      const profile: UserProfileInfo = {
+        ...p,
         remark: p.remark || bridge.identity.findFriend(userId)?.remark || '',
-        sex: p.sex,
-        age: p.age,
-        long_nick: p.sign,
-        qq_level: p.level,
-        level: p.level,
       };
+      const corp = await strangerCorpInfo(bridge, profile);
+      return formatStrangerInfo(profile, corp);
     }
 
     const friend = bridge.identity.findFriend(userId);
@@ -327,24 +363,33 @@ export async function getStrangerInfo(
 async function resolveRequesterUins(
   bridge: BridgeInterface,
   requests: readonly GroupRequestInfo[],
-): Promise<Map<string, number>> {
-  const resolved = new Map<string, number>();
+): Promise<Map<string, { uin: number; name: string }>> {
+  const resolved = new Map<string, { uin: number; name: string }>();
   const unresolved = new Set<string>();
+  const names = new Map<string, string>();
+  const unresolvedUins = new Set<number>();
 
   for (const request of requests) {
     const actor = groupRequestActor(request);
     const uid = actor.uid;
-    if (!uid || resolved.has(uid)) continue;
-    if (actor.uin > 0) {
-      resolved.set(uid, actor.uin);
+    if (actor.name) names.set(uid || `uin:${actor.uin}`, actor.name);
+    if (uid && actor.uin > 0 && actor.name) {
+      resolved.set(uid, { uin: actor.uin, name: actor.name });
       unresolved.delete(uid);
       continue;
     }
-    if (unresolved.has(uid)) continue;
-    const cached = bridge.identity.findUinByUid(uid, request.groupId)
-      ?? bridge.identity.findUinByUid(uid);
-    if (cached && cached > 0) resolved.set(uid, cached);
-    else unresolved.add(uid);
+    if (uid) {
+      if (resolved.has(uid) || unresolved.has(uid)) continue;
+      const cached = bridge.identity.findUinByUid(uid, request.groupId)
+        ?? bridge.identity.findUinByUid(uid);
+      if (cached && cached > 0 && actor.name) {
+        resolved.set(uid, { uin: cached, name: actor.name });
+      } else {
+        unresolved.add(uid);
+      }
+      continue;
+    }
+    if (actor.uin > 0 && !actor.name) unresolvedUins.add(actor.uin);
   }
 
   const profiles = await mapWithConcurrency(
@@ -361,11 +406,41 @@ async function resolveRequesterUins(
       if (!Number.isSafeInteger(profile.uin) || profile.uin <= 0) {
         throw new Error(`failed to resolve requester UIN for UID ${uid}`);
       }
-      return [uid, profile.uin] as const;
+      return [uid, profile] as const;
     },
   );
-  for (const [uid, uin] of profiles) resolved.set(uid, uin);
+  for (const [uid, profile] of profiles) {
+    resolved.set(uid, {
+      uin: profile.uin,
+      name: names.get(uid) || profile.nickname || '',
+    });
+  }
+
+  const uinProfiles = await mapWithConcurrency(
+    [...unresolvedUins],
+    REQUESTER_PROFILE_CONCURRENCY,
+    async (uin) => {
+      try {
+        return [uin, await bridge.apis.contacts.fetchUserProfile(uin)] as const;
+      } catch {
+        return [uin, undefined] as const;
+      }
+    },
+  );
+  for (const [uin, profile] of uinProfiles) {
+    if (!profile) continue;
+    resolved.set(`uin:${uin}`, { uin: profile.uin, name: profile.nickname || '' });
+  }
   return resolved;
+}
+
+/** Join request (7) or invite that still needs an admin (5 / mapped 22). */
+function isJoinOrInviteNotify(notifyType: number | undefined): boolean {
+  return notifyType === undefined
+    || notifyType === 1
+    || notifyType === 5
+    || notifyType === 7
+    || notifyType === 22;
 }
 
 function groupRequestActor(request: GroupRequestInfo): {
@@ -401,9 +476,7 @@ export async function getGroupSystemMessages(
   ]);
   const unique = new Map<string, GroupRequestInfo>();
   for (const request of [...main, ...filtered]) {
-    if (request.notifyType !== undefined
-      && request.notifyType !== 1
-      && request.notifyType !== 7) continue;
+    if (!isJoinOrInviteNotify(request.notifyType)) continue;
     if (request.eventType <= 0) continue;
     const flag = formatGroupRequestFlag(request);
     if (!unique.has(flag)) unique.set(flag, request);
@@ -417,12 +490,16 @@ export async function getGroupSystemMessages(
 
   return requests.map((request) => {
     const actor = groupRequestActor(request);
+    const resolved = (actor.uid ? requesterUins.get(actor.uid) : undefined)
+      ?? (actor.uin > 0 ? requesterUins.get(`uin:${actor.uin}`) : undefined);
     return {
       group_id: request.groupId,
       group_name: request.groupName,
       request_id: request.sequence,
-      requester_uin: requesterUins.get(actor.uid) ?? actor.uin,
-      requester_nick: actor.name,
+      requester_uin: resolved?.uin ?? actor.uin,
+      requester_nick: resolved?.name || actor.name,
+      invitor_uin: request.invitorUin,
+      invitor_nick: request.invitorName,
       message: request.comment,
       checked: request.state !== 1,
       flag: formatGroupRequestFlag(request),
@@ -444,12 +521,12 @@ export async function getDownloadRKeys(bridge: BridgeInterface): Promise<JsonObj
   }
 }
 
-function getCachedGroupMembers(identity: IdentityService, groupId: number): JsonObject[] {
-  const g = identity.findGroup(groupId);
+function getCachedGroupMembers(bridge: BridgeInterface, groupId: number): JsonObject[] {
+  const g = bridge.identity.findGroup(groupId);
   if (!g) return [];
   const result: JsonObject[] = [];
   for (const [, member] of g.members) {
-    result.push(formatGroupMember(groupId, member));
+    result.push(formatGroupMember(groupId, member, cachedQidianProfile(bridge, member.uin)));
   }
   return result;
 }
@@ -457,6 +534,7 @@ function getCachedGroupMembers(identity: IdentityService, groupId: number): Json
 function formatGroupMember(
   groupId: number,
   member: GroupMemberInfo,
+  profile?: UserProfileInfo,
 ): JsonObject {
   if (member.isRobot === undefined) {
     throw new Error(
@@ -484,5 +562,24 @@ function formatGroupMember(
     unfriendly: false,
     title_expire_time: 0,
     card_changeable: true,
+    // 企点标志（#404 后续 PR）：群成员信息同样透传用户资料上的企点标志，
+    // 未查到资料时全部为 0（普通账号）。
+    qidian_master_flag: profile?.qidianMasterFlag ?? 0,
+    qidian_crew_flag: profile?.qidianCrewFlag ?? 0,
+    qidian_crew_flag_2: profile?.qidianCrewFlag2 ?? 0,
   };
+}
+
+/** Best-effort read of a cached user profile's qidian flags. Triggers no
+ *  network call — only the identity cache (populated by fetchUserProfile /
+ *  fetchUserProfileByUid). */
+function cachedQidianProfile(bridge: BridgeInterface, uin: number): UserProfileInfo | undefined {
+  try {
+    if ('findUserProfile' in bridge.identity) {
+      return bridge.identity.findUserProfile(uin) ?? undefined;
+    }
+  } catch {
+    // profile cache lookup is best-effort; fall back to all-zero flags
+  }
+  return undefined;
 }

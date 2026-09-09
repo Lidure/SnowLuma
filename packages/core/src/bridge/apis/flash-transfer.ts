@@ -17,12 +17,115 @@ import { SetFilesetStatus } from '@snowluma/protocol/oidb-services/flash-transfe
 import { ApplyUpload } from '@snowluma/protocol/oidb-services/flash-transfer/apply-upload';
 import { PrepareUpload } from '@snowluma/protocol/oidb-services/flash-transfer/prepare-upload';
 import { SendFlashMsg } from '@snowluma/protocol/oidb-services/flash-transfer/send-flash';
-import { loadBinarySource, computeHashes } from '@snowluma/protocol/highway/utils';
+import { FileChunkSource } from '@snowluma/protocol/highway';
+import {
+  computeHashes,
+  inlineBase64Payload,
+  FLASH_TRANSFER_MAX_BYTES,
+  FLASH_TRANSFER_INLINE_MAX_BYTES,
+} from '@snowluma/protocol/highway/utils';
+import { stageSourceToDisk } from '@snowluma/protocol/highway/stage';
+import { hashFlashFileStreaming } from '@snowluma/protocol/highway/hash-file';
 import { computeSha1StateV } from '@snowluma/protocol/highway/sha1-stream';
 import { protobuf_encode, protobuf_decode } from '@snowluma/proton';
 import type { FlashSliceUploadBody, FlashSliceUploadResp, FlashFileId } from '@snowluma/proto-defs/oidb-actions/flash-transfer';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
+import { promises as fsp } from 'node:fs';
 import { deflateSync } from 'node:zlib';
+
+const FLASH_SLICE_SIZE = 1024 * 1024;
+
+const FLASH_IMAGE_EXT = new Set([
+  'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'heic', 'avif', 'tiff', 'tif', 'ico', 'dib', 'heif',
+]);
+const FLASH_AUDIO_EXT = new Set(['mp3', 'wav', 'aac', 'flac']);
+const FLASH_VIDEO_EXT = new Set([
+  'mp4', 'avi', 'mkv', 'mov', '3gp', 'mpeg', 'rmvb', 'rm', 'wmv', 'flv', 'asf', 'webm', 'mpg', 'vob', 'm4v', 'f4v',
+]);
+const FLASH_ARCHIVE_EXT = new Set(['zip', 'rar', 'tar', 'bz2', 'xz', 'tgz', 'gz', '7z']);
+const FLASH_MODEL_EXT = new Set(['pt', 'pth', 'onnx', 'model', 'mlmodel']);
+
+/** 0x93cf f3 粗类：压缩包走 2/6，其余按媒体类 7。 */
+function flashApplyTypeCode(ext: string): number {
+  if (ext === 'zip') return 6;
+  if (FLASH_ARCHIVE_EXT.has(ext)) return 2;
+  return 7;
+}
+
+/**
+ * 0x93d0 / 0x12a9 格式码。与 QQ 客户端按扩展名判定的图标类型一致：
+ * 图片 26、音频 1、视频 2、文档 3、压缩包 4、未知 11。
+ */
+function flashFormatCode(ext: string): number {
+  if (FLASH_IMAGE_EXT.has(ext)) return 26;
+  if (FLASH_AUDIO_EXT.has(ext)) return 1;
+  if (FLASH_VIDEO_EXT.has(ext)) return 2;
+  if (ext === 'doc' || ext === 'docx') return 3;
+  if (FLASH_ARCHIVE_EXT.has(ext)) return 4;
+  if (ext === 'apk') return 5;
+  if (ext === 'xls' || ext === 'xlsx') return 6;
+  if (ext === 'ppt' || ext === 'pptx') return 7;
+  if (ext === 'html' || ext === 'htm') return 8;
+  if (ext === 'pdf') return 9;
+  if (ext === 'txt') return 10;
+  if (ext === 'psd') return 12;
+  if (FLASH_MODEL_EXT.has(ext)) return 15;
+  if (ext === 'ttf' || ext === 'otf') return 16;
+  if (ext === 'ipa') return 17;
+  if (ext === 'dmg') return 23;
+  if (ext === 'pkg') return 24;
+  if (ext === 'key') return 18;
+  if (ext === 'note') return 19;
+  if (ext === 'numbers') return 20;
+  if (ext === 'pages') return 21;
+  if (ext === 'sketch') return 22;
+  if (ext === 'exe') return 27;
+  return 11;
+}
+
+/** After create returns, 0x93d4 can still omit the main-file fileId for a
+ *  few seconds (#364). Re-query on this schedule (first lookup is immediate). */
+const FLASH_FILE_ID_RETRY_DELAYS_MS = [1000, 2000, 4000, 4000] as const;
+
+/** Fail cleanly if the staged file changed since the streaming hash pass. */
+async function assertUnchanged(filePath: string, baseline: { size: number; mtimeMs: number }): Promise<void> {
+  const now = await fsp.stat(filePath);
+  if (now.size !== baseline.size || now.mtimeMs !== baseline.mtimeMs) {
+    throw new Error('file source changed during send (mutated between hashing and upload)');
+  }
+}
+
+function flashStageMaxBytes(source: string): number {
+  return inlineBase64Payload(source) !== null
+    ? FLASH_TRANSFER_INLINE_MAX_BYTES
+    : FLASH_TRANSFER_MAX_BYTES;
+}
+
+interface StagedFlashItem {
+  filePath: string;
+  fileSize: number;
+  fileName: string;
+  fileUuid: string;
+  fileIndex: number;
+  formatCode: number;
+  guardStat: { size: number; mtimeMs: number };
+  cleanup(): Promise<void>;
+}
+
+/** One create_flash_task source: a path/URL, or a path plus a display name. */
+export type FlashTaskFileInput = string | { file: string; name?: string };
+
+function flashFileDisplayName(override: string | undefined, fallback: string): string {
+  const cleaned = (override ?? '').replace(/[/\\]/g, '_').trim();
+  return cleaned || fallback;
+}
+
+function normalizeFlashTaskInputs(
+  files: FlashTaskFileInput | FlashTaskFileInput[],
+): { file: string; name?: string }[] {
+  const list = Array.isArray(files) ? files : [files];
+  return list.map((item) => (typeof item === 'string' ? { file: item } : item));
+}
 
 /** 闪传文件信息（业务层，从 FlashFileEntry 转换）。 */
 export interface FlashFileInfo {
@@ -216,21 +319,30 @@ export class FlashTransferApi {
    * 多文件时每条 f6=序号、f14=主文件 fileId），按 fileIndex 选中后走 0x12a9 sub=200
    * 拿主文件直链。0x93d3/0x93d4 的 downloadUrl 字段是缩略图（appid=14903/14902），
    * 主文件必须走 0x12a9 sub=200。
+   *
+   * create 刚返回时 f14 可能还是空的（#364）。fileId 空则按
+   * FLASH_FILE_ID_RETRY_DELAYS_MS 再问 0x93d4；已经有 fileId 后 0x12a9 只打一枪。
    */
   private async getFileDownload(
     filesetUuid: string, fileIndex: number = 1,
   ): Promise<{ url: string; fileName: string; fileSize: number } | null> {
-    const metas = await GetDownloadUrl.invoke(this.ctx, { filesetUuid });
-    const meta = metas.find((m) => m.fileIndex === fileIndex);
-    if (!meta || !meta.fileId) return null;
-    const url = await GetFlashDownload.invoke(this.ctx, {
-      filesetUuid: meta.filesetUuid,
-      fileUuid: meta.fileUuid,
-      fileId: meta.fileId,
-      fileName: meta.fileName,
-    });
-    if (!url) return null;
-    return { url, fileName: meta.fileName, fileSize: meta.fileSize };
+    for (let attempt = 0; ; attempt++) {
+      const metas = await GetDownloadUrl.invoke(this.ctx, { filesetUuid });
+      const meta = metas.find((m) => m.fileIndex === fileIndex);
+      if (meta?.fileId) {
+        const url = await GetFlashDownload.invoke(this.ctx, {
+          filesetUuid: meta.filesetUuid,
+          fileUuid: meta.fileUuid,
+          fileId: meta.fileId,
+          fileName: meta.fileName,
+        });
+        if (!url) return null;
+        return { url, fileName: meta.fileName, fileSize: meta.fileSize };
+      }
+      const delay = FLASH_FILE_ID_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) return null;
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
   }
 
   /**
@@ -329,21 +441,13 @@ export class FlashTransferApi {
   // ─────────────── 文件上传 ───────────────
 
   /**
-   * 文件扩展名 → 闪传类型码映射。typeCode 用于 0x93cf f3，formatCode 用于
-   * 0x93d0 commit f7 与 0x12a9 filesetWrap.f7（两者同值）。mp4 → 2，rar/zip → 4。
-   * 未知扩展名按媒体类处理（formatCode=2），服务端按文件名扩展名判定。
+   * 文件扩展名 → 闪传类型码。typeCode 用于 0x93cf f3（卡片粗类：压缩包/媒体）；
+   * formatCode 用于 0x93d0 commit f7 与 0x12a9 filesetWrap.f7，决定对端图标
+   * （png=26，mp4=2，zip=4，未知=11）。
    */
   private static fileTypeCode(fileName: string): { typeCode: number; formatCode: number } {
     const ext = fileName.toLowerCase().match(/\.([^.]+)$/)?.[1] ?? '';
-    switch (ext) {
-      case 'rar': return { typeCode: 2, formatCode: 4 };
-      case 'zip': return { typeCode: 6, formatCode: 4 };
-      case '7z': case 'gz': case 'tar': case 'bz2': return { typeCode: 2, formatCode: 4 };
-      case 'png': case 'jpg': case 'jpeg': case 'bmp': case 'gif': case 'webp':
-      case 'mp4': case 'mov': case 'avi': case 'mkv':
-        return { typeCode: 7, formatCode: 2 };
-      default: return { typeCode: 7, formatCode: 2 };
-    }
+    return { typeCode: flashApplyTypeCode(ext), formatCode: flashFormatCode(ext) };
   }
 
   /** 构造 sub=103 的 fileId（客户端生成的 protobuf，base64url 编码）。
@@ -377,11 +481,21 @@ export class FlashTransferApi {
    * 多文件：0x93d0 的 f4 是 repeated，一个 commit 请求同时携带 fileset 内所有文件
    * 条目，每条 f6=文件序号（1,2,3...）。commit 在上传前只发一次，之后 complete →
    * 逐个 prepare/apply/sliceupload。prepare/apply 的 filesetWrap.f4 必须与 commit
-   * 的 f6 一致，否则文件不计入 fileset。多文件时 ApplyFileset 的 fileName 用
-   * 「<首文件名>等N个文件」、fileSize 用总和——服务端据此判定 fileset 为多文件。
+   * 的 f6 一致，否则文件不计入 fileset。ApplyFileset 的 fileName 是 fileset 显示名
+   * （卡片标题）：有 name 用 name，否则单文件用首文件名、多文件用「<首文件名>等N个文件」。
+   * fileSize 用总和——服务端据此判定 fileset 为多文件。各文件在 commit 里用
+   * 条目上的 name（若有），否则用路径 basename。
+   *
+   * 源文件经 stageSourceToDisk 落到本地路径后流式哈希 / 分片读取，不再经
+   * loadBinarySource 整文件进内存。本地与 HTTP 上限与群文件相同（4 GiB）；
+   * 内联 base64 仍按 1 GiB 封顶，因为 stage 解码时会占用等量 RAM。
    */
-  async createFlashTask(files: string | string[], _name?: string, _thumbPath?: string): Promise<{ filesetId: string }> {
-    const fileList = Array.isArray(files) ? files : [files];
+  async createFlashTask(
+    files: FlashTaskFileInput | FlashTaskFileInput[],
+    name?: string,
+    _thumbPath?: string,
+  ): Promise<{ filesetId: string }> {
+    const fileList = normalizeFlashTaskInputs(files);
     if (fileList.length === 0) throw new Error('create_flash_task: files is empty');
     const uploader = {
       uin: this.ctx.identity.uin,
@@ -390,104 +504,127 @@ export class FlashTransferApi {
       // uid drops the fileset if this runs before warmup populated selfUid.
       uid: await resolveSelfUid(this.ctx),
     };
-    // 读取所有文件，每个分配 fileUuid + 序号 + formatCode
-    const items: { bytes: Uint8Array; fileName: string; fileUuid: string; fileIndex: number; formatCode: number }[] = [];
-    for (let i = 0; i < fileList.length; i++) {
-      const { bytes, fileName } = await loadBinarySource(fileList[i], 'flash-transfer');
-      const { formatCode } = FlashTransferApi.fileTypeCode(fileName);
-      items.push({ bytes: new Uint8Array(bytes), fileName, fileUuid: randomUUID(), fileIndex: i + 1, formatCode });
+    const items: StagedFlashItem[] = [];
+    try {
+      for (let i = 0; i < fileList.length; i++) {
+        const source = fileList[i]!.file;
+        if (!source) throw new Error('create_flash_task: files is empty');
+        const staged = await stageSourceToDisk(source, flashStageMaxBytes(source));
+        const fileName = flashFileDisplayName(fileList[i]!.name, staged.fileName);
+        const { formatCode } = FlashTransferApi.fileTypeCode(fileName);
+        items.push({
+          filePath: staged.filePath,
+          fileSize: staged.fileSize,
+          fileName,
+          fileUuid: randomUUID(),
+          fileIndex: i + 1,
+          formatCode,
+          guardStat: await fsp.stat(staged.filePath),
+          cleanup: () => staged.cleanup(),
+        });
+        if (staged.fileSize === 0) throw new Error('create_flash_task: file is empty');
+      }
+      // 申请 fileset。fileName 是卡片/面板上的 fileset 标题；各文件真实名走 commit。
+      // 未指定 name 时，多文件用「<首文件名>等N个文件」、fileSize 用总和，
+      // 服务端据此判定 fileset 为多文件，commit 的后续 entry 才会被计入。
+      const first = items[0];
+      const { typeCode } = FlashTransferApi.fileTypeCode(first.fileName);
+      const isMulti = items.length > 1;
+      const filesetName = name?.trim()
+        || (isMulti ? `${first.fileName}等${items.length}个文件` : first.fileName);
+      const totalSize = items.reduce((s, it) => s + it.fileSize, 0);
+      const apply = await ApplyFileset.invoke(this.ctx, {
+        fileName: filesetName, origName: filesetName,
+        fileSize: totalSize, typeCode, uploader,
+      });
+      const filesetUuid = apply.filesetUuid;
+      if (!filesetUuid) throw new Error('apply fileset failed: missing uuid');
+      // 一次性 commit 所有文件元数据（f4 repeated，每条 f6=序号）
+      const commitEntries = items.map((it) => ({
+        fileUuid: it.fileUuid, fileName: it.fileName, origName: it.fileName,
+        fileSize: it.fileSize, formatCode: it.formatCode, fileIndex: it.fileIndex,
+      }));
+      await CommitFile.invoke(this.ctx, { filesetUuid, entries: commitEntries });
+      await CompleteFileset.invoke(this.ctx, { filesetUuid });
+      // 两阶段上传：先全部 prepare+apply 注册 fileId，再全部 sliceupload 落盘。
+      const prepared: { it: StagedFlashItem; rkey: string; sha1StateV: Uint8Array[]; sliceCount: number }[] = [];
+      for (const it of items) {
+        const p = await this.prepareAndApply(filesetUuid, it);
+        if (p) prepared.push({ it, ...p });
+      }
+      for (const p of prepared) {
+        await assertUnchanged(p.it.filePath, p.it.guardStat);
+        await this.sliceuploadFile(
+          p.it.filePath, p.it.fileSize, p.rkey, p.sha1StateV, p.sliceCount, p.it.fileName,
+        );
+      }
+      // fileset 级缩略图（序号在主文件之后递增），主文件下载入口需要缩略图关联
+      await this.uploadThumbnail(filesetUuid, items[0].fileUuid, 'png', items.length + 1);
+      await this.uploadThumbnail(filesetUuid, items[0].fileUuid, 'jpg', items.length + 2);
+      await SetFilesetStatus.invoke(this.ctx, { filesetUuid });
+      return { filesetId: filesetUuid };
+    } finally {
+      await Promise.all(items.map((it) => it.cleanup()));
     }
-    // 申请 fileset。多文件时 fileName 用「<首文件名>等N个文件」、fileSize 用总和，
-    // 服务端据此判定 fileset 为多文件，commit 的后续 entry 才会被计入。
-    const first = items[0];
-    const { typeCode } = FlashTransferApi.fileTypeCode(first.fileName);
-    const isMulti = items.length > 1;
-    const filesetName = isMulti ? `${first.fileName}等${items.length}个文件` : first.fileName;
-    const totalSize = items.reduce((s, it) => s + it.bytes.length, 0);
-    const apply = await ApplyFileset.invoke(this.ctx, {
-      fileName: filesetName, origName: filesetName,
-      fileSize: totalSize, typeCode, uploader,
-    });
-    const filesetUuid = apply.filesetUuid;
-    if (!filesetUuid) throw new Error('apply fileset failed: missing uuid');
-    // 一次性 commit 所有文件元数据（f4 repeated，每条 f6=序号）
-    const commitEntries = items.map((it) => ({
-      fileUuid: it.fileUuid, fileName: it.fileName, origName: it.fileName,
-      fileSize: it.bytes.length, formatCode: it.formatCode, fileIndex: it.fileIndex,
-    }));
-    await CommitFile.invoke(this.ctx, { filesetUuid, entries: commitEntries });
-    await CompleteFileset.invoke(this.ctx, { filesetUuid });
-    // 两阶段上传：先全部 prepare+apply 注册 fileId，再全部 sliceupload 落盘。
-    const prepared: { it: typeof items[0]; rkey: string; sha1StateV: Uint8Array[]; sliceCount: number }[] = [];
-    for (const it of items) {
-      const p = await this.prepareAndApply(filesetUuid, it.bytes, it.fileName, it.fileUuid, it.fileIndex, it.formatCode);
-      if (p) prepared.push({ it, ...p });
-    }
-    for (const p of prepared) {
-      await this.sliceuploadFile(p.it.bytes, p.rkey, p.sha1StateV, p.sliceCount, p.it.fileName);
-    }
-    // fileset 级缩略图（序号在主文件之后递增），主文件下载入口需要缩略图关联
-    await this.uploadThumbnail(filesetUuid, items[0].fileUuid, 'png', items.length + 1);
-    await this.uploadThumbnail(filesetUuid, items[0].fileUuid, 'jpg', items.length + 2);
-    await SetFilesetStatus.invoke(this.ctx, { filesetUuid });
-    return { filesetId: filesetUuid };
   }
 
   /**
-   * 阶段1：prepare（拿 rkey）+ apply（注册 fileId）。返回 sliceupload 所需的 rkey/sha1state。
-   * 秒传（rkey=null）返回 null，调用方跳过 sliceupload。
+   * 阶段1：流式哈希 + prepare（拿 rkey）+ apply（注册 fileId）。
+   * 秒传时 prepare 不回 rkey，仍必须 apply，否则 fileset 会一直停在等待上传；
+   * 返回 null 只表示调用方跳过 sliceupload。
    */
   private async prepareAndApply(
-    filesetUuid: string, bytes: Uint8Array, fileName: string, fileUuid: string, fileIndex: number, formatCode: number,
+    filesetUuid: string, it: StagedFlashItem,
   ): Promise<{ rkey: string; sha1StateV: Uint8Array[]; sliceCount: number } | null> {
-    const fileSize = bytes.length;
-    const hashes = computeHashes(bytes);
-    const SLICE_SIZE = 1024 * 1024;
-    const sliceCount = Math.ceil(fileSize / SLICE_SIZE);
-    const sha1StateV = computeSha1StateV(bytes, sliceCount, SLICE_SIZE);
+    const hashes = await hashFlashFileStreaming(it.filePath);
+    await assertUnchanged(it.filePath, it.guardStat);
 
     const rkey = await PrepareUpload.invoke(this.ctx, {
-      filesetUuid, fileUuid, fileName, fileSize, sha1: hashes.sha1Hex, fileIndex, formatCode,
+      filesetUuid, fileUuid: it.fileUuid, fileName: it.fileName, fileSize: it.fileSize,
+      sha1: hashes.sha1Hex, fileIndex: it.fileIndex, formatCode: it.formatCode,
     });
-    if (rkey === null) return null;  // 秒传
-
-    const fileId = FlashTransferApi.buildFileId(hashes.sha1, fileSize);
+    const fileId = FlashTransferApi.buildFileId(hashes.sha1, it.fileSize);
     await ApplyUpload.invoke(this.ctx, {
-      filesetUuid, fileUuid, fileId, fileName, fileSize,
-      md5: hashes.md5Hex, sha1: hashes.sha1Hex, fileIndex, formatCode,
+      filesetUuid, fileUuid: it.fileUuid, fileId, fileName: it.fileName, fileSize: it.fileSize,
+      md5: hashes.md5Hex, sha1: hashes.sha1Hex, fileIndex: it.fileIndex, formatCode: it.formatCode,
     });
-    return { rkey, sha1StateV, sliceCount };
+    if (rkey === null) return null;
+    return { rkey, sha1StateV: hashes.sha1StateV, sliceCount: hashes.sliceCount };
   }
 
   /**
-   * 阶段2：sliceupload 分片上传（所有文件 prepare+apply 完成后调用）。
+   * 阶段2：从磁盘按 1 MiB 切片 POST sliceupload（所有文件 prepare+apply 完成后调用）。
    */
   private async sliceuploadFile(
-    bytes: Uint8Array, rkey: string, sha1StateV: Uint8Array[], sliceCount: number, fileName: string,
+    filePath: string, fileSize: number, rkey: string,
+    sha1StateV: Uint8Array[], sliceCount: number, fileName: string,
   ): Promise<void> {
-    const fileSize = bytes.length;
-    const SLICE_SIZE = 1024 * 1024;
-    for (let i = 0; i < sliceCount; i++) {
-      const start = i * SLICE_SIZE;
-      const chunk = bytes.subarray(start, Math.min(start + SLICE_SIZE, fileSize));
-      const chunkLen = chunk.length;
-      const chunkSha1 = new Uint8Array(createHash('sha1').update(Buffer.from(chunk)).digest());
-      const body: FlashSliceUploadBody = {
-        field1: 0,
-        appid: 14901,
-        field3: 2,
-        payload: {
-          field1: {},
-          rkey,
-          start,
-          end: start + chunkLen - 1,
-          sha1: chunkSha1,
-          sha1StateV: { state: sha1StateV.map((s) => new Uint8Array(s)) },
-          chunk: new Uint8Array(chunk),
-        },
-      };
-      const bodyBytes = protobuf_encode<FlashSliceUploadBody>(body);
-      await this.postSliceupload(bodyBytes, `${fileName} slice ${i}`);
+    const src = await FileChunkSource.open(filePath, fileSize);
+    try {
+      for (let i = 0; i < sliceCount; i++) {
+        const start = i * FLASH_SLICE_SIZE;
+        const chunkLen = Math.min(FLASH_SLICE_SIZE, fileSize - start);
+        const chunk = await src.read(start, chunkLen);
+        const chunkSha1 = new Uint8Array(createHash('sha1').update(Buffer.from(chunk)).digest());
+        const body: FlashSliceUploadBody = {
+          field1: 0,
+          appid: 14901,
+          field3: 2,
+          payload: {
+            field1: {},
+            rkey,
+            start,
+            end: start + chunkLen - 1,
+            sha1: chunkSha1,
+            sha1StateV: { state: sha1StateV.map((s) => new Uint8Array(s)) },
+            chunk: new Uint8Array(chunk),
+          },
+        };
+        const bodyBytes = protobuf_encode<FlashSliceUploadBody>(body);
+        await this.postSliceupload(bodyBytes, `${fileName} slice ${i}`);
+      }
+    } finally {
+      await src.close();
     }
   }
 
@@ -541,12 +678,12 @@ export class FlashTransferApi {
       filesetUuid, fileUuid, fileName, fileSize, sha1: hashes.sha1Hex,
       fileIndex, formatCode: thumbFormatCode, thumbType, width, height,
     });
-    if (rkey === null) return;  // 秒传
     const fileId = FlashTransferApi.buildFileId(hashes.sha1, fileSize, appid);
     await ApplyUpload.invoke(this.ctx, {
       filesetUuid, fileUuid, fileId, fileName, fileSize,
       md5: hashes.md5Hex, sha1: hashes.sha1Hex, fileIndex, formatCode: thumbFormatCode, thumbType, width, height,
     });
+    if (rkey === null) return;
     // sliceupload（缩略图小，1 片，Sha1StateV=[标准 SHA1]）
     const sha1StateV = computeSha1StateV(new Uint8Array(thumbBytes), 1, fileSize);
     const body: FlashSliceUploadBody = {

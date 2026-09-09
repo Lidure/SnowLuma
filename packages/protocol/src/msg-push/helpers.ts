@@ -13,8 +13,27 @@ export type DecompressDataResult =
 
 export function makeImageUrl(origUrl: string): string {
   if (!origUrl) return '';
-  if (origUrl.includes('rkey')) return 'https://multimedia.nt.qq.com.cn' + origUrl;
+  if (/^https?:\/\//i.test(origUrl)) return origUrl;
+  // Compatibility faces sometimes carry a query fragment without a path.
+  // Prefixing the host onto that produces an unusable URL.
+  if (!origUrl.startsWith('/')) return '';
+  if (origUrl.includes('rkey') || origUrl.includes('fileid')) {
+    return 'https://multimedia.nt.qq.com.cn' + origUrl;
+  }
   return 'http://gchat.qpic.cn' + origUrl;
+}
+
+/** Classic group-pic URL used when the wire carries an MD5 and no download path. */
+export function imageUrlFromMd5(md5Hex: string): string {
+  if (!/^[0-9a-fA-F]{32}$/.test(md5Hex)) return '';
+  return `http://gchat.qpic.cn/gchatpic_new/0/0-0-${md5Hex.toUpperCase()}/0`;
+}
+
+/** NT multimedia download URL reconstructed from a file id when the path is omitted. */
+export function ntImageUrlFromFileId(fileId: string, isGroup: boolean): string {
+  if (!fileId) return '';
+  const appid = isGroup ? 1407 : 1406;
+  return `https://multimedia.nt.qq.com.cn/download?appid=${appid}&fileid=${encodeURIComponent(fileId)}`;
 }
 
 export function decompressData(
@@ -62,28 +81,27 @@ export function decompressData(
   return { ok: true, text: Buffer.from(data).toString('utf8'), outputBytes: data.length };
 }
 
-export function isNumericUin(value: string): boolean {
-  return value.length > 0 && /^\d+$/.test(value);
-}
-
 export function parseU64OrZero(value: string): number {
   if (!value) return 0;
   const n = parseInt(value, 10);
   return isNaN(n) ? 0 : n;
 }
 
-// Cascades group-scoped lookup → in-memory map → SQLite.
-// No network fallback on the parse hot path: missing identities fall back to
-// `fallback` and downstream events drive a roster refresh asynchronously.
-export function resolveUidToUin(identity: IdentityService, groupId: number, uid: string, fallback = 0): number {
-  if (!uid) return fallback;
-  if (isNumericUin(uid)) {
-    const n = parseInt(uid, 10);
-    if (!isNaN(n)) return n;
-  }
-  const uin = identity.findUinByUid(uid, groupId || undefined);
-  if (uin !== null) return uin;
-  return fallback;
+/** Sync Identity lookup. Miss is unresolved (0). Decoder must not invent a UIN. */
+export function resolveUidToUin(identity: IdentityService, groupId: number, uid: string): number {
+  if (!uid) return 0;
+  return identity.findUinByUid(uid, groupId || undefined) ?? 0;
+}
+
+/**
+ * C2C routing hop. Prefer Identity on the hop UID; otherwise use that hop's
+ * own wire UIN. This is not a fallback that assigns an unrelated header UIN
+ * to a different UID.
+ */
+export function c2cRoutingUin(identity: IdentityService, uid: string, wireUin: number): number {
+  const resolved = resolveUidToUin(identity, 0, uid);
+  if (resolved > 0) return resolved;
+  return wireUin > 0 ? wireUin : 0;
 }
 
 const OPERATOR_BYTES_PREVIEW_LENGTH = 32;
