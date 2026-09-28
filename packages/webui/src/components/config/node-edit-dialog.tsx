@@ -44,6 +44,7 @@ import type {
   WsServerNetwork,
 } from '@/types';
 import { generateAccessToken, NETWORK_TABS } from './defaults';
+import { WsClientRoutingFields, type RoutingWsClientNetwork } from './ws-client-routing-fields';
 
 type AnyAdapter<K extends NetworkKind> = OneBotNetworks[K][number];
 
@@ -232,6 +233,13 @@ export function NodeEditDialog<K extends NetworkKind>(props: NodeEditDialogProps
             </SettingRow>
           </div>
         </Section>
+
+        {kind === 'wsClients' && (
+          <WsClientRoutingFields
+            value={draft as RoutingWsClientNetwork}
+            onChange={(changes) => patch(changes as unknown as Partial<AnyAdapter<K>>)}
+          />
+        )}
       </div>
     </Modal>
   );
