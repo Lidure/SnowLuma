@@ -82,6 +82,20 @@ pnpm test
 
 OneBot 发送 `reply` 段时，会将本地消息缓存中的原文附入 QQ 引用预览，保留文字、换行与引用关系。图片、语音等非文字段以类型提示显示，不重新上传媒体；原消息中的嵌套引用不递归展开。只有消息元数据而没有缓存正文时，不生成虚构的预览内容。
 
+### 自用 Raspberry Pi 5 / Linux ARM64 打包
+
+`feat/ws-client-scoped-keywords-prefix` 自用分支提供 Windows 本地打包入口 `build_pi_release.bat`。双击后会复用项目现有 `linux-arm64` 构建链路，并把 `.node-version` 指定版本的 Linux ARM64 Node.js 一并放入完整运行包。
+
+生成文件位于本地 `release/` 目录，命名格式为：
+
+```text
+SnowLuma-Lidure-v<version>-linux-arm64.tar.gz
+```
+
+将压缩包复制到 Raspberry Pi 5 后，解压到运行目录，并确保 `launcher.sh` 与内置 `node` 有执行权限。升级已有安装时请保留原来的 `config/`、`data/` 和需要的日志目录，不要整目录直接删除。
+
+完整包内置 Node.js，树莓派端不需要安装 pnpm 或源码开发依赖。该打包入口仅用于非商业自托管和私下修改，不会自动创建公开 GitHub Release，也不会把 `config/`、`data/`、日志、源码、Git 历史或本地机器人连接配置打入发行包。
+
 ## 使用边界与许可
 
 > [!IMPORTANT]
