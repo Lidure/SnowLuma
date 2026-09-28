@@ -1,0 +1,21 @@
+name: WS Client Picker Test
+
+on:
+  push:
+    branches:
+      - feat/ws-client-routing-active-final
+
+jobs:
+  picker-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter webui test -- src/components/config/group-message-filter-utils.test.ts
