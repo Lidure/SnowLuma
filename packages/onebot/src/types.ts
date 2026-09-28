@@ -26,6 +26,40 @@ export type WsRole = 'Api' | 'Event' | 'Universal';
 
 export type MessageFormat = 'array' | 'string';
 
+export type GroupMessageFilterMode = 'blacklist' | 'whitelist';
+
+/** Per-client allow/deny list applied only to group message events. */
+export interface GroupMessageFilterConfig {
+  mode: GroupMessageFilterMode;
+  groupIds: number[];
+}
+
+/** Per-client allow/deny list applied only to private message events. */
+export interface PrivateMessageFilterConfig {
+  mode: GroupMessageFilterMode;
+  userIds: number[];
+}
+
+/**
+ * Per-client content filter. A non-empty groupIds list scopes group-message
+ * filtering to those groups; private messages continue to use the filter.
+ */
+export interface KeywordFilterConfig {
+  mode: GroupMessageFilterMode;
+  patterns: string[];
+  regex?: boolean;
+  groupIds?: number[];
+}
+
+/**
+ * Per-client routing prefix required only in the listed groups. The prefix is
+ * removed from the event copy delivered to this WS client.
+ */
+export interface MessagePrefixConfig {
+  prefix: string;
+  groupIds: number[];
+}
+
 export type NetworkKind = 'httpServers' | 'httpClients' | 'wsServers' | 'wsClients';
 
 export interface NetworkBase {
@@ -63,6 +97,10 @@ export interface WsClientNetwork extends NetworkBase {
   url: string;
   role?: WsRole;
   reconnectIntervalMs?: number;
+  groupMessageFilter?: GroupMessageFilterConfig;
+  privateMessageFilter?: PrivateMessageFilterConfig;
+  keywordFilter?: KeywordFilterConfig;
+  messagePrefix?: MessagePrefixConfig;
 }
 
 export interface OneBotNetworks {
