@@ -28,6 +28,10 @@ jobs:
         run: grep -q "keywordScopeEnabled" packages/webui/src/components/config/node-edit-dialog.tsx || python tools/apply-scoped-routing-webui.py
       - run: pnpm test
       - run: pnpm typecheck
+      - name: Test ARM64 packaging helpers
+        run: node --test tools/package-linux-arm64.test.mjs
+      - name: Build all workspaces
+        run: pnpm run build:all
       - name: Commit generated feature files
         if: success()
         run: |
