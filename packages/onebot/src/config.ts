@@ -11,6 +11,7 @@ import type {
   JsonObject,
   KeywordFilterConfig,
   MessageFormat,
+  MessagePrefixConfig,
   OneBotConfig,
   OneBotNetworks,
   PrivateMessageFilterConfig,
@@ -200,11 +201,13 @@ const RESTORE_NETWORK_KEYS = new Set(['httpServers', 'httpClients', 'wsServers',
 const RESTORE_BASE_ADAPTER_KEYS = ['name', 'enabled', 'accessToken', 'messageFormat', 'reportSelfMessage'] as const;
 const GROUP_MESSAGE_FILTER_KEYS = new Set(['mode', 'groupIds']);
 const PRIVATE_MESSAGE_FILTER_KEYS = new Set(['mode', 'userIds']);
-const KEYWORD_FILTER_KEYS = new Set(['mode', 'patterns', 'regex']);
+const KEYWORD_FILTER_KEYS = new Set(['mode', 'patterns', 'regex', 'groupIds']);
+const MESSAGE_PREFIX_KEYS = new Set(['prefix', 'groupIds']);
 /** Caps for keyword filter patterns — generous enough for real rules while
  *  keeping pathological configs out of the hot dispatch path. */
 export const KEYWORD_FILTER_MAX_PATTERNS = 200;
 export const KEYWORD_FILTER_PATTERN_MAX_LENGTH = 256;
+export const MESSAGE_PREFIX_MAX_LENGTH = 64;
 
 function validateOneBotRestoreSource(value: JsonObject): void {
   rejectUnknownKeys(value, RESTORE_TOP_LEVEL_KEYS, '$');
@@ -266,7 +269,7 @@ function validateRestoreAdapterArray(value: unknown, kind: keyof OneBotNetworks,
     ? ['host', 'port', 'path']
     : kind === 'httpClients'
       ? ['url', 'timeoutMs']
-      : ['url', 'role', 'reconnectIntervalMs', 'groupMessageFilter', 'privateMessageFilter', 'keywordFilter'];
+      : ['url', 'role', 'reconnectIntervalMs', 'groupMessageFilter', 'privateMessageFilter', 'keywordFilter', 'messagePrefix'];
   if (kind === 'httpServers') specific.push('enableWebSocket');
   if (kind === 'wsServers') specific.push('role');
   const allowed = new Set<string>([...RESTORE_BASE_ADAPTER_KEYS, ...specific]);
@@ -319,6 +322,7 @@ function validateRestoreAdapterArray(value: unknown, kind: keyof OneBotNetworks,
       validateGroupMessageFilter(raw.groupMessageFilter, `${pathAt}.groupMessageFilter`);
       validatePrivateMessageFilter(raw.privateMessageFilter, `${pathAt}.privateMessageFilter`);
       validateKeywordFilter(raw.keywordFilter, `${pathAt}.keywordFilter`);
+      validateMessagePrefix(raw.messagePrefix, `${pathAt}.messagePrefix`);
     }
   });
   return value.length;
@@ -442,6 +446,7 @@ export function assertValidOneBotConfig(value: unknown): asserts value is OneBot
     validateGroupMessageFilter(item.groupMessageFilter, `${at}.groupMessageFilter`);
     validatePrivateMessageFilter(item.privateMessageFilter, `${at}.privateMessageFilter`);
     validateKeywordFilter(item.keywordFilter, `${at}.keywordFilter`);
+    validateMessagePrefix(item.messagePrefix, `${at}.messagePrefix`);
   });
 
   if (!isObject(value.statusCommand)) invalid('statusCommand must be an object');
@@ -651,6 +656,20 @@ function parsePrivateMessageFilter(value: unknown): PrivateMessageFilterConfig |
   };
 }
 
+function validatePositiveIdArray(value: unknown, at: string, allowEmpty: boolean): void {
+  if (!Array.isArray(value)) invalid(`${at} must be an array`);
+  if (!allowEmpty && value.length === 0) invalid(`${at} must contain at least one entry`);
+  value.forEach((id, index) => {
+    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+      invalid(`${at}[${String(index)}] must be a positive safe integer`);
+    }
+  });
+}
+
+function dedupePositiveIds(value: number[]): number[] {
+  return [...new Set(value)];
+}
+
 function validateKeywordFilter(value: unknown, at: string): void {
   if (value === undefined) return;
   if (!isObject(value)) invalid(`${at} must be an object`);
@@ -665,6 +684,7 @@ function validateKeywordFilter(value: unknown, at: string): void {
   if (value.regex !== undefined && typeof value.regex !== 'boolean') {
     invalid(`${at}.regex must be a boolean`);
   }
+  if (value.groupIds !== undefined) validatePositiveIdArray(value.groupIds, `${at}.groupIds`, true);
   value.patterns.forEach((pattern, index) => {
     if (typeof pattern !== 'string' || pattern.length === 0) {
       invalid(`${at}.patterns[${String(index)}] must be a non-empty string`);
@@ -697,7 +717,31 @@ function parseKeywordFilter(value: unknown): KeywordFilterConfig | undefined {
     mode: raw.mode as KeywordFilterConfig['mode'],
     patterns,
     regex: raw.regex === true ? true : undefined,
+    groupIds: Array.isArray(raw.groupIds) ? dedupePositiveIds(raw.groupIds as number[]) : undefined,
   }) as KeywordFilterConfig;
+}
+
+function validateMessagePrefix(value: unknown, at: string): void {
+  if (value === undefined) return;
+  if (!isObject(value)) invalid(`${at} must be an object`);
+  rejectUnknownKeys(value, MESSAGE_PREFIX_KEYS, at);
+  if (typeof value.prefix !== 'string' || !value.prefix || value.prefix !== value.prefix.trim() || /[\r\n]/.test(value.prefix)) {
+    invalid(`${at}.prefix must be a non-empty trimmed single-line string`);
+  }
+  if (value.prefix.length > MESSAGE_PREFIX_MAX_LENGTH) {
+    invalid(`${at}.prefix must be at most ${MESSAGE_PREFIX_MAX_LENGTH} characters`);
+  }
+  validatePositiveIdArray(value.groupIds, `${at}.groupIds`, false);
+}
+
+function parseMessagePrefix(value: unknown): MessagePrefixConfig | undefined {
+  if (value === undefined) return undefined;
+  validateMessagePrefix(value, 'ws client messagePrefix');
+  const raw = value as JsonObject;
+  return {
+    prefix: raw.prefix as string,
+    groupIds: dedupePositiveIds(raw.groupIds as number[]),
+  };
 }
 
 function invalid(message: string): never {
@@ -830,7 +874,16 @@ function wsClientToJson(n: WsClientNetwork): JsonObject {
       patterns: [...new Set(n.keywordFilter.patterns)],
     };
     if (n.keywordFilter.regex === true) keyword.regex = true;
+    if (n.keywordFilter.groupIds !== undefined) {
+      keyword.groupIds = [...new Set(n.keywordFilter.groupIds)];
+    }
     out.keywordFilter = keyword;
+  }
+  if (n.messagePrefix) {
+    out.messagePrefix = {
+      prefix: n.messagePrefix.prefix,
+      groupIds: [...new Set(n.messagePrefix.groupIds)],
+    };
   }
   return out;
 }
@@ -1054,6 +1107,7 @@ function parseWsClient(value: JsonObject, defaults: AdapterDefaults): WsClientNe
     groupMessageFilter: parseGroupMessageFilter(value.groupMessageFilter),
     privateMessageFilter: parsePrivateMessageFilter(value.privateMessageFilter),
     keywordFilter: parseKeywordFilter(value.keywordFilter),
+    messagePrefix: parseMessagePrefix(value.messagePrefix),
   });
 }
 
