@@ -23,6 +23,17 @@ export interface MessagePrefixConfig {
   groupIds: number[];
 }
 
+export interface SelectOptionLike {
+  value: string;
+  label: string;
+  sub?: string;
+  avatar?: string;
+}
+
+export interface ResolvedSelectedOption extends SelectOptionLike {
+  missing?: boolean;
+}
+
 function parseIdListInput(value: string, noun: string): { ids: number[]; error?: string } {
   const text = value.trim();
   if (!text) return { ids: [] };
@@ -78,4 +89,28 @@ export function parseKeywordPatternsInput(value: string, regex: boolean): { patt
 
 export function formatKeywordPatternsInput(patterns: string[] | undefined): string {
   return (patterns ?? []).join('\n');
+}
+
+export function mergeSelectedValues(current: string[], incoming: string[]): string[] {
+  const seen = new Set(current);
+  const merged = [...current];
+  for (const value of incoming) {
+    if (!seen.has(value)) {
+      seen.add(value);
+      merged.push(value);
+    }
+  }
+  return merged;
+}
+
+export function resolveSelectedOptions(
+  values: string[],
+  options: ReadonlyArray<SelectOptionLike>,
+  fallbackLabel: string,
+): ResolvedSelectedOption[] {
+  const byValue = new Map(options.map((option) => [option.value, option]));
+  return values.map((value) => {
+    const option = byValue.get(value);
+    return option ?? { value, label: fallbackLabel, sub: value, missing: true };
+  });
 }
