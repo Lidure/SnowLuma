@@ -26,6 +26,32 @@ export type WsRole = 'Api' | 'Event' | 'Universal';
 
 export type MessageFormat = 'array' | 'string';
 
+export type GroupMessageFilterMode = 'blacklist' | 'whitelist';
+
+export interface GroupMessageFilterConfig {
+  mode: GroupMessageFilterMode;
+  groupIds: number[];
+}
+
+/** Per-sender filter applied only to private chat message events. */
+export interface PrivateMessageFilterConfig {
+  mode: GroupMessageFilterMode;
+  userIds: number[];
+}
+
+/**
+ * Per-client message content filter (borrowed from OneBotFilter's message
+ * filter). Applies to BOTH private and group chat message events.
+ * blacklist: matched messages are dropped; whitelist: only matched messages
+ * pass. Patterns are plain substrings unless `regex` is true.
+ */
+export interface KeywordFilterConfig {
+  mode: GroupMessageFilterMode;
+  patterns: string[];
+  /** When `true`, patterns are treated as regular expressions. */
+  regex?: boolean;
+}
+
 export type NetworkKind = 'httpServers' | 'httpClients' | 'wsServers' | 'wsClients';
 
 export interface NetworkBase {
@@ -63,6 +89,13 @@ export interface WsClientNetwork extends NetworkBase {
   url: string;
   role?: WsRole;
   reconnectIntervalMs?: number;
+  /** Optional per-client filter applied only to group chat message events. */
+  groupMessageFilter?: GroupMessageFilterConfig;
+  /** Optional per-client filter applied only to private chat message events. */
+  privateMessageFilter?: PrivateMessageFilterConfig;
+  /** Optional per-client content filter applied to both private and group
+   *  chat message events. */
+  keywordFilter?: KeywordFilterConfig;
 }
 
 export interface OneBotNetworks {
