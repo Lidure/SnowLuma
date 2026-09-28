@@ -5,6 +5,7 @@ import { Label } from '@/components/ui/label';
 import { MultiPicker } from '@/components/ui/multi-picker';
 import { MultiTagInput } from '@/components/ui/multi-tag-input';
 import { ToggleSwitch } from '@/components/ui/toggle-switch';
+import { useAppState } from '@/contexts/AppStateContext';
 import { useFriends, useGroups } from '@/hooks/use-debug-contacts';
 import type { WsClientNetwork } from '@/types';
 import {
@@ -24,7 +25,6 @@ export type RoutingWsClientNetwork = WsClientNetwork & {
 };
 
 interface Props {
-  uin: string;
   value: RoutingWsClientNetwork;
   onChange: (changes: Partial<RoutingWsClientNetwork>) => void;
 }
@@ -64,9 +64,10 @@ function isPositiveSafeInteger(raw: string): boolean {
   return Number.isSafeInteger(value) && value > 0;
 }
 
-export function WsClientRoutingFields({ uin, value, onChange }: Props) {
-  const groups = useGroups(uin);
-  const friends = useFriends(uin);
+export function WsClientRoutingFields({ value, onChange }: Props) {
+  const { selectedUin } = useAppState();
+  const groups = useGroups(selectedUin ?? '');
+  const friends = useFriends(selectedUin ?? '');
   const [keywordScopeEnabled, setKeywordScopeEnabled] = useState(value.keywordFilter?.groupIds !== undefined);
   const [keywordError, setKeywordError] = useState<string>();
 
