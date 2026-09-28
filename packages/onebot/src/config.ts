@@ -16,6 +16,15 @@ import type {
   WsRole,
   WsServerNetwork,
 } from './types';
+import {
+  ROUTING_WS_CLIENT_KEYS,
+  parseGroupMessageFilter,
+  parseKeywordFilter,
+  parseMessagePrefix,
+  parsePrivateMessageFilter,
+  routingConfigToJson,
+  validateWsClientRouting,
+} from './routing-config';
 
 const log = createLogger('OneBot.Config');
 
@@ -256,7 +265,7 @@ function validateRestoreAdapterArray(value: unknown, kind: keyof OneBotNetworks,
     ? ['host', 'port', 'path']
     : kind === 'httpClients'
       ? ['url', 'timeoutMs']
-      : ['url', 'role', 'reconnectIntervalMs'];
+      : ['url', 'role', 'reconnectIntervalMs', ...ROUTING_WS_CLIENT_KEYS];
   if (kind === 'httpServers') specific.push('enableWebSocket');
   if (kind === 'wsServers') specific.push('role');
   const allowed = new Set<string>([...RESTORE_BASE_ADAPTER_KEYS, ...specific]);
@@ -304,6 +313,10 @@ function validateRestoreAdapterArray(value: unknown, kind: keyof OneBotNetworks,
       if (interval === null || interval < 1000 || interval > NODE_TIMER_MAX_MS) {
         invalid(`${pathAt}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`);
       }
+    }
+    if (kind === 'wsClients') {
+      const routingError = validateWsClientRouting(raw, pathAt);
+      if (routingError) invalid(routingError);
     }
   });
   return value.length;
@@ -424,6 +437,8 @@ export function assertValidOneBotConfig(value: unknown): asserts value is OneBot
     ) {
       invalid(`${at}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`);
     }
+    const routingError = validateWsClientRouting(item, at);
+    if (routingError) invalid(routingError);
   });
 
   if (!isObject(value.statusCommand)) invalid('statusCommand must be an object');
@@ -681,6 +696,7 @@ function wsClientToJson(n: WsClientNetwork): JsonObject {
     typeof n.reconnectIntervalMs === 'number' && Number.isFinite(n.reconnectIntervalMs)
       ? Math.max(1000, Math.trunc(n.reconnectIntervalMs))
       : 5000;
+  Object.assign(out, routingConfigToJson(n));
   return out;
 }
 
@@ -900,6 +916,10 @@ function parseWsClient(value: JsonObject, defaults: AdapterDefaults): WsClientNe
     url,
     role: asRole(value.role, 'Universal'),
     reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),
+    groupMessageFilter: parseGroupMessageFilter(value.groupMessageFilter),
+    privateMessageFilter: parsePrivateMessageFilter(value.privateMessageFilter),
+    keywordFilter: parseKeywordFilter(value.keywordFilter),
+    messagePrefix: parseMessagePrefix(value.messagePrefix),
   });
 }
 
