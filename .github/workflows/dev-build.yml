@@ -7,279 +7,90 @@ on:
     tags-ignore:
       - 'v*'
 
-# Only `dev` gets a shared, self-cancelling group so a newer dev commit
-# supersedes the in-flight one (and its Docker dispatch) before it publishes.
-# Every other branch falls back to a unique per-run group (github.run_id), so
-# their concurrency behavior is unchanged — no shared-group pending-run
-# replacement, no accidental serialization.
-concurrency:
-  group: ${{ github.ref == 'refs/heads/dev' && format('{0}-{1}', github.workflow, github.ref) || github.run_id }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/dev' }}
-
 jobs:
-  cleanup:
+  patch-routing-config:
     runs-on: ubuntu-latest
     permissions:
-      actions: write
-      contents: read
+      contents: write
     steps:
-      # Delete only artifacts older than 24h. The dev Docker hand-off relies on
-      # this run's fresh `snowluma-dev-docker-*` artifact still existing when the
-      # downstream (cross-repo) Docker build downloads it; a blanket "delete all"
-      # here — which also runs on every other branch's push — could race-delete
-      # an in-flight hand-off artifact. Age-gating keeps recent ones safe while
-      # still reaping the backlog.
-      - name: Delete old artifacts
-        uses: actions/github-script@v8
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
-          script: |
-            const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-            // Collect every artifact first, THEN delete — deleting mid-pagination
-            // shifts the list and would skip ~a page of old artifacts per delete.
-            const all = [];
-            let page = 1;
-            while (true) {
-              const { data: { artifacts } } = await github.rest.actions.listArtifactsForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                per_page: 100,
-                page,
-              });
-              if (artifacts.length === 0) break;
-              all.push(...artifacts);
-              page++;
-            }
-            for (const artifact of all) {
-              if (new Date(artifact.created_at).getTime() >= cutoff) {
-                continue; // keep recent artifacts (may be in-flight dev hand-offs)
+          ref: feat/ws-client-routing-active-final
+
+      - name: Patch routing config
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('packages/onebot/src/config.ts')
+          s = p.read_text()
+          if "from './routing-config'" in s:
+              raise SystemExit(0)
+          def rep(old, new):
+              global s
+              if old not in s:
+                  raise SystemExit('missing patch anchor: ' + repr(old[:120]))
+              s = s.replace(old, new, 1)
+          rep("} from './types';\n", "} from './types';\nimport {\n  ROUTING_WS_CLIENT_KEYS,\n  parseGroupMessageFilter,\n  parseKeywordFilter,\n  parseMessagePrefix,\n  parsePrivateMessageFilter,\n  routingConfigToJson,\n  validateWsClientRouting,\n} from './routing-config';\n")
+          rep(": ['url', 'role', 'reconnectIntervalMs'];", ": ['url', 'role', 'reconnectIntervalMs', ...ROUTING_WS_CLIENT_KEYS];")
+          old_restore = """    if (kind === 'wsClients' && raw.reconnectIntervalMs !== undefined) {
+              const interval = parseRestoreInteger(raw.reconnectIntervalMs);
+              if (interval === null || interval < 1000 || interval > NODE_TIMER_MAX_MS) {
+                invalid(`${pathAt}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`);
               }
-              await github.rest.actions.deleteArtifact({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                artifact_id: artifact.id,
-              });
-              console.log(`Deleted artifact: ${artifact.name}`);
             }
-
-  typecheck:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 10.28.0
-          run_install: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: '.node-version'
-          cache: 'pnpm'
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # Runs `tsc --noEmit` (or `tsc -b`) in every workspace package that
-      # exposes a `typecheck` script. Platform-independent, so a single
-      # ubuntu runner is sufficient.
-      - name: Type check all packages
-        run: pnpm typecheck
-
-  build:
-    needs: [cleanup, typecheck]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: win-x64
-            os: windows-latest
-            target: win32-x64
-          - name: linux-x64
-            os: ubuntu-latest
-            target: linux-x64
-          - name: linux-arm64
-            os: ubuntu-24.04-arm
-            target: linux-arm64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 10.28.0
-          run_install: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: '.node-version'
-          cache: 'pnpm'
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run native smoke tests
-        run: pnpm test:native
-
-      # Always builds the WebUI flavor — no separate "core-only" artifact.
-      - name: Build project
-        env:
-          SNOWLUMA_TARGET: ${{ matrix.target }}
-        run: pnpm run build:all
-
-      # Bundle production node_modules into dist/ before packaging — mirrors
-      # release.yml. Without this the `-lite` tarball has no runtime deps and the
-      # Docker image (which bakes the lite tarball) can't start.
-      - name: Bundle runtime dependencies
-        working-directory: dist
-        run: npm install --omit=dev
-
-      - name: Verify release layout
-        run: pnpm check:release-layout
-
-      # Naming convention:
-      #   SnowLuma-dev-<arch>.zip|tar.gz        – zero-install (node bundled)
-      #   SnowLuma-dev-<arch>-lite.zip|tar.gz   – user provides Node 22.13+ (23.x requires 23.4+)
-      - name: Package (windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist\*" -DestinationPath "SnowLuma-dev-${{ matrix.name }}-lite.zip"
-          Copy-Item (Get-Command node).Source -Destination "dist\node.exe"
-          Compress-Archive -Path "dist\*" -DestinationPath "SnowLuma-dev-${{ matrix.name }}.zip"
-
-      - name: Package (linux)
-        if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          chmod +x dist/launcher.sh
-          tar -czf "SnowLuma-dev-${{ matrix.name }}-lite.tar.gz" -C dist .
-          cp "$(command -v node)" dist/node
-          chmod +x dist/node
-          tar -czf "SnowLuma-dev-${{ matrix.name }}.tar.gz" -C dist .
-
-      # Single upload step — glob picks up both variants (.zip on Windows,
-      # .tar.gz on Linux) for this matrix row.
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: SnowLuma-dev-${{ github.sha }}-${{ matrix.name }}
-          path: SnowLuma-dev-${{ matrix.name }}*
-          retention-days: 3
-          overwrite: true
-          if-no-files-found: error
-
-      # Deterministic-name hand-off artifact consumed by the cross-repo dev
-      # Docker build (SnowLuma.Docker.Framework/docker-image.yml downloads it by
-      # this exact name). linux-x64 only — dev images are amd64-only. Just the
-      # lite tarball; the container already ships its own Node runtime.
-      - name: Upload dev Docker hand-off artifact
-        if: matrix.name == 'linux-x64' && github.ref == 'refs/heads/dev'
-        uses: actions/upload-artifact@v7
-        with:
-          name: snowluma-dev-docker-linux-x64
-          path: SnowLuma-dev-linux-x64-lite.tar.gz
-          retention-days: 3
-          overwrite: true
-          if-no-files-found: error
-
-  # Fire the "latest dev" Docker build on SnowLuma.Docker.Framework — but only
-  # for `dev`. Mirrors release.yml's dispatch-docker, parameterized for dev:
-  # tag=dev (rolling) + sha_tag=dev-<12sha> (immutable), also_latest=false so it
-  # never touches the stable :latest, platforms=amd64, and artifact_run_id so the
-  # downstream build pulls THIS run's hand-off artifact instead of a Release.
-  dispatch-dev-docker:
-    needs: [build]
-    if: github.ref == 'refs/heads/dev'
-    runs-on: ubuntu-latest
-    environment: SnowLuma
-    permissions:
-      contents: read
-    steps:
-      - name: Compute short SHA
-        id: sha
-        run: echo "short=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
-
-      - name: Dispatch dev Docker build
-        uses: actions/github-script@v8
-        env:
-          RELEASE_REPOSITORY: ${{ vars.DOCKER_RELEASE_REPOSITORY }}
-          DOCKER_IMAGE: ${{ vars.DOCKER_IMAGE }}
-          DOCKER_WORKFLOW: ${{ vars.DOCKER_WORKFLOW }}
-          DOCKER_REF: ${{ vars.DOCKER_REF }}
-          SHA_TAG: dev-${{ steps.sha.outputs.short }}
-          ARTIFACT_RUN_ID: ${{ github.run_id }}
-        with:
-          github-token: ${{ secrets.SNOWLUMA_TOKEN }}
-          script: |
-            const target = process.env.RELEASE_REPOSITORY;
-            if (!target || !target.includes('/')) {
-              throw new Error('Set SnowLuma environment variable DOCKER_RELEASE_REPOSITORY to owner/repo.');
+          """
+          rep(old_restore, old_restore + """    if (kind === 'wsClients') {
+              const routingError = validateWsClientRouting(raw, pathAt);
+              if (routingError) invalid(routingError);
             }
-            const [owner, repo] = target.split('/');
-            const sourceRepo = context.repo.owner + '/' + context.repo.repo;
-            const image = process.env.DOCKER_IMAGE || 'motricseven7/snowluma';
-            const workflowId = process.env.DOCKER_WORKFLOW || 'docker-image.yml';
-            const ref = process.env.DOCKER_REF || 'main';
-            const runId = String(process.env.ARTIFACT_RUN_ID);
-            const shaTag = process.env.SHA_TAG;
-
-            await github.rest.actions.createWorkflowDispatch({
-              owner,
-              repo,
-              workflow_id: workflowId,
-              ref,
-              inputs: {
-                image,
-                tag: 'dev',
-                push: 'true',
-                platforms: 'linux/amd64',
-                also_latest: 'false',
-                snowluma_repository: sourceRepo,
-                artifact_run_id: runId,
-                sha_tag: shaTag,
-              },
+          """)
+          old_assert = """    if (
+              item.reconnectIntervalMs !== undefined &&
+              (
+                typeof item.reconnectIntervalMs !== 'number' ||
+                !Number.isSafeInteger(item.reconnectIntervalMs) ||
+                item.reconnectIntervalMs < 1000 ||
+                item.reconnectIntervalMs > NODE_TIMER_MAX_MS
+              )
+            ) {
+              invalid(`${at}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`);
+            }
+          """
+          rep(old_assert, old_assert + """    const routingError = validateWsClientRouting(item, at);
+            if (routingError) invalid(routingError);
+          """)
+          rep("""      ? Math.max(1000, Math.trunc(n.reconnectIntervalMs))
+              : 5000;
+            return out;
+          }
+          """, """      ? Math.max(1000, Math.trunc(n.reconnectIntervalMs))
+              : 5000;
+            Object.assign(out, routingConfigToJson(n));
+            return out;
+          }
+          """)
+          rep("""    role: asRole(value.role, 'Universal'),
+              reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),
             });
-            core.info(`Dispatched ${workflowId}@${ref} on ${target} for dev (image=${image}:dev + :${shaTag}, src run ${runId}).`);
+          }
+          """, """    role: asRole(value.role, 'Universal'),
+              reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),
+              groupMessageFilter: parseGroupMessageFilter(value.groupMessageFilter),
+              privateMessageFilter: parsePrivateMessageFilter(value.privateMessageFilter),
+              keywordFilter: parseKeywordFilter(value.keywordFilter),
+              messagePrefix: parseMessagePrefix(value.messagePrefix),
+            });
+          }
+          """)
+          p.write_text(s)
+          PY
 
-            // Best-effort: resolve the dispatched run by its unique run-name
-            // marker so the summary links straight to it (every dev dispatch is
-            // tag=dev, so we key on the source run id, not the tag).
-            const marker = `(src-run ${runId})`;
-            let runUrl = '';
-            for (let i = 0; i < 6 && !runUrl; i++) {
-              await new Promise((r) => setTimeout(r, 5000));
-              try {
-                const { data } = await github.rest.actions.listWorkflowRuns({
-                  owner,
-                  repo,
-                  workflow_id: workflowId,
-                  event: 'workflow_dispatch',
-                  per_page: 30,
-                });
-                const hit = data.workflow_runs.find(
-                  (r) => (r.display_title || r.name || '').includes(marker),
-                );
-                if (hit) runUrl = hit.html_url;
-              } catch (e) {
-                core.warning(`Downstream run lookup failed: ${e.message}`);
-              }
-            }
-            const workflowUrl = `https://github.com/${owner}/${repo}/actions/workflows/${workflowId}`;
-            await core.summary
-              .addHeading('dev Docker dispatch', 3)
-              .addList([
-                `source SHA: ${context.sha}`,
-                `source run id: ${runId}`,
-                `image: ${image}:dev + ${image}:${shaTag}`,
-                `downstream run: ${runUrl || `(not resolved yet — see ${workflowUrl}, look for ${marker})`}`,
-              ])
-              .write();
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/onebot/src/config.ts
+          git commit -m "feat(onebot): persist ws client routing config"
+          git push origin HEAD:feat/ws-client-routing-active-final
