@@ -1,6 +1,8 @@
 import { WebSocket } from '@snowluma/websocket';
 import { createLogger } from '@snowluma/common/logger';
 import {
+  applyMessagePrefix,
+  buildDispatchPayload,
   passesKeywordFilter,
   pickDispatchJson,
   resolveReportOptions,
@@ -103,7 +105,11 @@ export class WsClientAdapter extends IOneBotNetworkAdapter<WsClientNetwork> {
     if (!shouldDispatchGroupMessage(event, this.config.groupMessageFilter)) return;
     if (!shouldDispatchPrivateMessage(event, this.config.privateMessageFilter)) return;
     if (!passesKeywordFilter(event, this.config.keywordFilter)) return;
-    const json = pickDispatchJson(payload, this.options);
+
+    const routedEvent = applyMessagePrefix(event, this.config.messagePrefix);
+    if (routedEvent === null) return;
+    const routedPayload = routedEvent === event ? payload : buildDispatchPayload(routedEvent);
+    const json = pickDispatchJson(routedPayload, this.options);
     if (json === null) return;
     safeSend(this.socket, json);
   }
