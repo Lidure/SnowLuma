@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { DropdownSelect } from '@/components/ui/dropdown-select';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -34,7 +34,7 @@ const MODE_OPTIONS = [
   { value: 'whitelist', label: '白名单' },
 ] as const;
 
-function Card({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
+function Card({ title, desc, children }: { title: string; desc: string; children: ReactNode }) {
   return (
     <div className="rounded-2xl border border-border/60 bg-card/40 p-4">
       <div className="mb-3">
@@ -56,6 +56,7 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
   const [keywordText, setKeywordText] = useState(formatKeywordPatternsInput(value.keywordFilter?.patterns));
   const [keywordGroupText, setKeywordGroupText] = useState(formatGroupIdsInput(value.keywordFilter?.groupIds));
   const [prefixGroupText, setPrefixGroupText] = useState(formatGroupIdsInput(value.messagePrefix?.groupIds));
+  const [keywordScopeEnabled, setKeywordScopeEnabled] = useState(value.keywordFilter?.groupIds !== undefined);
   const [groupError, setGroupError] = useState<string>();
   const [privateError, setPrivateError] = useState<string>();
   const [keywordError, setKeywordError] = useState<string>();
@@ -65,8 +66,10 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
   const groupEnabled = !!value.groupMessageFilter;
   const privateEnabled = !!value.privateMessageFilter;
   const keywordEnabled = !!value.keywordFilter;
-  const keywordScoped = !!value.keywordFilter?.groupIds?.length;
   const prefixEnabled = !!value.messagePrefix;
+  const keywordGroupsMissing = keywordEnabled && keywordScopeEnabled && (value.keywordFilter?.groupIds?.length ?? 0) === 0;
+  const prefixGroupsMissing = prefixEnabled && (value.messagePrefix?.groupIds.length ?? 0) === 0;
+  const prefixMissing = prefixEnabled && !value.messagePrefix?.prefix.trim();
 
   return (
     <section className="flex flex-col gap-1.5">
@@ -147,9 +150,10 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
             <Label>启用</Label>
             <ToggleSwitch
               value={keywordEnabled}
-              onChange={(enabled) => onChange({
-                keywordFilter: enabled ? { mode: 'blacklist', patterns: [], regex: false } : undefined,
-              })}
+              onChange={(enabled) => {
+                if (!enabled) setKeywordScopeEnabled(false);
+                onChange({ keywordFilter: enabled ? { mode: 'blacklist', patterns: [], regex: false } : undefined });
+              }}
               ariaLabel="启用关键词过滤"
             />
           </div>
@@ -195,14 +199,16 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
                 <p className="text-xs text-muted-foreground">关闭时保持旧行为：所有群聊都应用关键词规则。</p>
               </div>
               <ToggleSwitch
-                value={keywordScoped}
-                onChange={(enabled) => onChange({
-                  keywordFilter: { ...value.keywordFilter!, groupIds: enabled ? [] : undefined },
-                })}
+                value={keywordScopeEnabled}
+                onChange={(enabled) => {
+                  setKeywordScopeEnabled(enabled);
+                  if (!enabled) setKeywordGroupError(undefined);
+                  onChange({ keywordFilter: { ...value.keywordFilter!, groupIds: enabled ? [] : undefined } });
+                }}
                 ariaLabel="关键词仅应用于指定群聊"
               />
             </div>
-            {keywordScoped && <div>
+            {keywordScopeEnabled && <div>
               <Input
                 value={keywordGroupText}
                 placeholder="应用关键词规则的群号"
@@ -210,11 +216,12 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
                   const text = event.target.value;
                   setKeywordGroupText(text);
                   const parsed = parseGroupIdsInput(text);
-                  setKeywordGroupError(parsed.error);
+                  const missing = !parsed.error && parsed.groupIds.length === 0;
+                  setKeywordGroupError(parsed.error ?? (missing ? '启用指定群聊后至少填写一个群号' : undefined));
                   if (!parsed.error) onChange({ keywordFilter: { ...value.keywordFilter!, groupIds: parsed.groupIds } });
                 }}
               />
-              <ErrorText text={keywordGroupError} />
+              <ErrorText text={keywordGroupError ?? (keywordGroupsMissing ? '启用指定群聊后至少填写一个群号' : undefined)} />
             </div>}
           </div>}
         </Card>
@@ -224,9 +231,10 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
             <Label>启用</Label>
             <ToggleSwitch
               value={prefixEnabled}
-              onChange={(enabled) => onChange({
-                messagePrefix: enabled ? { prefix: '/', groupIds: [] } : undefined,
-              })}
+              onChange={(enabled) => {
+                setPrefixGroupError(enabled ? '启用前缀后至少填写一个群号' : undefined);
+                onChange({ messagePrefix: enabled ? { prefix: '/airi', groupIds: [] } : undefined });
+              }}
               ariaLabel="启用节点消息前缀"
             />
           </div>
@@ -239,6 +247,7 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
                 placeholder="例如 /airi"
                 onChange={(event) => onChange({ messagePrefix: { ...value.messagePrefix!, prefix: event.target.value } })}
               />
+              <ErrorText text={prefixMissing ? '前缀不能为空' : undefined} />
             </div>
             <div>
               <Label>应用群聊</Label>
@@ -250,11 +259,12 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
                   const text = event.target.value;
                   setPrefixGroupText(text);
                   const parsed = parseGroupIdsInput(text);
-                  setPrefixGroupError(parsed.error);
+                  const missing = !parsed.error && parsed.groupIds.length === 0;
+                  setPrefixGroupError(parsed.error ?? (missing ? '启用前缀后至少填写一个群号' : undefined));
                   if (!parsed.error) onChange({ messagePrefix: { ...value.messagePrefix!, groupIds: parsed.groupIds } });
                 }}
               />
-              <ErrorText text={prefixGroupError} />
+              <ErrorText text={prefixGroupError ?? (prefixGroupsMissing ? '启用前缀后至少填写一个群号' : undefined)} />
             </div>
           </div>}
         </Card>
