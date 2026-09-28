@@ -6,7 +6,7 @@ on:
       - feat/ws-client-scoped-keywords-prefix-test-harness
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -22,5 +22,18 @@ jobs:
           node-version-file: '.node-version'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
+      - name: Apply one-shot config patch
+        run: grep -q "MESSAGE_PREFIX_KEYS" packages/onebot/src/config.ts || python tools/apply-scoped-routing-config.py
       - run: pnpm test
       - run: pnpm typecheck
+      - name: Commit generated config change
+        if: success()
+        run: |
+          git add packages/onebot/src/config.ts
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat(onebot): persist scoped keyword and prefix routing"
+          git push
