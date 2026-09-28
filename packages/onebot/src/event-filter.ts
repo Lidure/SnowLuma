@@ -4,6 +4,7 @@ import type {
   JsonValue,
   KeywordFilterConfig,
   MessageFormat,
+  MessagePrefixConfig,
   PrivateMessageFilterConfig,
 } from './types';
 
@@ -111,11 +112,10 @@ function matchesPattern(text: string, pattern: string, regex: boolean): boolean 
 }
 
 /**
- * Content filter applied to both private and group chat message events.
- * blacklist: matched messages are dropped; whitelist: only matched messages
- * pass. An empty pattern list matches nothing — so an empty blacklist passes
- * everything and an empty whitelist blocks everything, mirroring the
- * group/private id filters.
+ * Content filter applied to private and group chat message events.
+ * A non-empty `groupIds` list scopes only the group side of the filter;
+ * private-message behavior stays unchanged. Absent/empty scope keeps the
+ * legacy all-groups behavior.
  */
 export function passesKeywordFilter(
   event: JsonObject,
@@ -125,9 +125,89 @@ export function passesKeywordFilter(
   if (event.post_type !== 'message' && event.post_type !== 'message_sent') return true;
   if (event.message_type !== 'private' && event.message_type !== 'group') return true;
 
+  if (event.message_type === 'group' && filter.groupIds && filter.groupIds.length > 0) {
+    const groupId = event.group_id;
+    if (typeof groupId !== 'number' || !Number.isSafeInteger(groupId) || groupId <= 0) {
+      return true;
+    }
+    if (!filter.groupIds.includes(groupId)) return true;
+  }
+
   const matched = filter.patterns.length > 0
     && filter.patterns.some((pattern) => matchesPattern(extractMessageText(event), pattern, filter.regex === true));
   return filter.mode === 'blacklist' ? !matched : matched;
+}
+
+function stripConfiguredPrefix(text: string, prefix: string): string | null {
+  if (!text.startsWith(prefix)) return null;
+  return text.slice(prefix.length).replace(/^\s+/, '');
+}
+
+function firstTextSegment(message: unknown): { index: number; segment: JsonObject; data: JsonObject; text: string } | null {
+  if (!Array.isArray(message) || message.length === 0) return null;
+  const first = message[0];
+  if (typeof first !== 'object' || first === null || Array.isArray(first)) return null;
+  const segment = first as JsonObject;
+  if (segment.type !== 'text') return null;
+  if (typeof segment.data !== 'object' || segment.data === null || Array.isArray(segment.data)) return null;
+  const data = segment.data as JsonObject;
+  if (typeof data.text !== 'string') return null;
+  return { index: 0, segment, data, text: data.text };
+}
+
+/**
+ * Apply a WS-client-specific group prefix gate without mutating the shared
+ * OneBot event. `null` means the selected group message does not carry the
+ * required prefix. Unselected groups, private messages and non-message events
+ * return the original event object unchanged.
+ */
+export function applyMessagePrefix(
+  event: JsonObject,
+  config: MessagePrefixConfig | undefined,
+): JsonObject | null {
+  if (!config || !config.prefix) return event;
+  if (event.post_type !== 'message' && event.post_type !== 'message_sent') return event;
+  if (event.message_type !== 'group') return event;
+
+  const groupId = event.group_id;
+  if (typeof groupId !== 'number' || !Number.isSafeInteger(groupId) || groupId <= 0) return event;
+  if (!config.groupIds.includes(groupId)) return event;
+
+  let strippedRaw: string | undefined;
+  if (typeof event.raw_message === 'string') {
+    const stripped = stripConfiguredPrefix(event.raw_message, config.prefix);
+    if (stripped === null) return null;
+    strippedRaw = stripped;
+  }
+
+  let transformedMessage: JsonValue | undefined;
+  if (typeof event.message === 'string') {
+    const stripped = stripConfiguredPrefix(event.message, config.prefix);
+    if (stripped === null) return null;
+    transformedMessage = stripped;
+  } else if (Array.isArray(event.message)) {
+    const firstText = firstTextSegment(event.message);
+    if (!firstText) return null;
+    const stripped = stripConfiguredPrefix(firstText.text, config.prefix);
+    if (stripped === null) return null;
+    const cloned = [...event.message] as JsonValue[];
+    cloned[firstText.index] = {
+      ...firstText.segment,
+      data: {
+        ...firstText.data,
+        text: stripped,
+      },
+    } as JsonValue;
+    transformedMessage = cloned;
+  } else if (strippedRaw === undefined) {
+    // Nothing in the event proves the configured prefix was present.
+    return null;
+  }
+
+  const transformed: JsonObject = { ...event };
+  if (strippedRaw !== undefined) transformed.raw_message = strippedRaw;
+  if (transformedMessage !== undefined) transformed.message = transformedMessage;
+  return transformed;
 }
 
 export function pickDispatchJson(
