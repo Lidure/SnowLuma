@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as filterUtils from './group-message-filter-utils';
 import {
   formatGroupIdsInput,
   formatKeywordPatternsInput,
@@ -99,5 +100,37 @@ describe('keyword filter input', () => {
   it('formats patterns for editing', () => {
     expect(formatKeywordPatternsInput(['广告', '推广'])).toBe('广告\n推广');
     expect(formatKeywordPatternsInput(undefined)).toBe('');
+  });
+});
+
+describe('routing multi-select helpers', () => {
+  it('merges newly selected values without duplicates while preserving order', () => {
+    const merge = (filterUtils as unknown as {
+      mergeSelectedValues?: (current: string[], incoming: string[]) => string[];
+    }).mergeSelectedValues;
+    expect(merge).toBeTypeOf('function');
+    expect(merge?.(['985983966'], ['787682322', '985983966'])).toEqual([
+      '985983966',
+      '787682322',
+    ]);
+  });
+
+  it('keeps configured values that are no longer present in the live contact list', () => {
+    const resolve = (filterUtils as unknown as {
+      resolveSelectedOptions?: (
+        values: string[],
+        options: Array<{ value: string; label: string; sub?: string }>,
+        fallbackLabel: string,
+      ) => Array<{ value: string; label: string; sub?: string; missing?: boolean }>;
+    }).resolveSelectedOptions;
+    expect(resolve).toBeTypeOf('function');
+    expect(resolve?.(
+      ['985983966', '111222333'],
+      [{ value: '985983966', label: 'Airi测试群', sub: '985983966' }],
+      '未知群聊',
+    )).toEqual([
+      { value: '985983966', label: 'Airi测试群', sub: '985983966' },
+      { value: '111222333', label: '未知群聊', sub: '111222333', missing: true },
+    ]);
   });
 });
