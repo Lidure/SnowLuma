@@ -6,7 +6,7 @@ on:
       - feat/ws-client-routing-active-final
 
 jobs:
-  onebot-routing-test:
+  private-feature-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,4 +18,9 @@ jobs:
           node-version: 22.13.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @snowluma/onebot test -- ws-client-routing.test.ts
+      - name: OneBot routing tests
+        run: pnpm --filter @snowluma/onebot test -- ws-client-routing.test.ts ws-client-routing-config.test.ts
+      - name: WebUI routing helper tests
+        run: pnpm --filter webui test -- src/components/config/group-message-filter-utils.test.ts
+      - name: ARM64 packaging unit tests
+        run: node --test tools/package-linux-arm64.test.mjs
