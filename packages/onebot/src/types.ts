@@ -40,8 +40,8 @@ export interface PrivateMessageFilterConfig {
 }
 
 /**
- * Per-client message content filter (borrowed from OneBotFilter's message
- * filter). Applies to BOTH private and group chat message events.
+ * Per-client message content filter. Applies to private messages and, for
+ * group messages, either all groups (legacy/default) or the optional scope.
  * blacklist: matched messages are dropped; whitelist: only matched messages
  * pass. Patterns are plain substrings unless `regex` is true.
  */
@@ -50,6 +50,17 @@ export interface KeywordFilterConfig {
   patterns: string[];
   /** When `true`, patterns are treated as regular expressions. */
   regex?: boolean;
+  /** Optional group scope. Absent/empty preserves legacy all-group behavior. */
+  groupIds?: number[];
+}
+
+/**
+ * Per-client routing prefix applied only to the selected group chats. The
+ * prefix is removed from the client-specific event before it is dispatched.
+ */
+export interface MessagePrefixConfig {
+  prefix: string;
+  groupIds: number[];
 }
 
 export type NetworkKind = 'httpServers' | 'httpClients' | 'wsServers' | 'wsClients';
@@ -93,9 +104,10 @@ export interface WsClientNetwork extends NetworkBase {
   groupMessageFilter?: GroupMessageFilterConfig;
   /** Optional per-client filter applied only to private chat message events. */
   privateMessageFilter?: PrivateMessageFilterConfig;
-  /** Optional per-client content filter applied to both private and group
-   *  chat message events. */
+  /** Optional per-client content filter. */
   keywordFilter?: KeywordFilterConfig;
+  /** Optional group-scoped prefix gate and transform. */
+  messagePrefix?: MessagePrefixConfig;
 }
 
 export interface OneBotNetworks {
