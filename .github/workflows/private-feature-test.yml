@@ -24,16 +24,19 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Apply one-shot config patch
         run: grep -q "MESSAGE_PREFIX_KEYS" packages/onebot/src/config.ts || python tools/apply-scoped-routing-config.py
+      - name: Apply one-shot WebUI patch
+        run: grep -q "keywordScopeEnabled" packages/webui/src/components/config/node-edit-dialog.tsx || python tools/apply-scoped-routing-webui.py
       - run: pnpm test
       - run: pnpm typecheck
-      - name: Commit generated config change
+      - name: Commit generated feature files
         if: success()
         run: |
-          git add packages/onebot/src/config.ts
+          git add packages/onebot/src/config.ts packages/webui/src/components/config/node-edit-dialog.tsx
           if git diff --cached --quiet; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "feat(onebot): persist scoped keyword and prefix routing"
+          git commit -m "feat: materialize scoped ws client routing"
+          git pull --rebase origin feat/ws-client-scoped-keywords-prefix-test-harness
           git push
