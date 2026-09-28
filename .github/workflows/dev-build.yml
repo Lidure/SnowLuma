@@ -22,67 +22,42 @@ jobs:
         run: |
           python3 <<'PY'
           from pathlib import Path
+          import re
+
           p = Path('packages/onebot/src/config.ts')
           s = p.read_text()
           if "from './routing-config'" in s:
               raise SystemExit(0)
+
           def rep(old, new):
               global s
               if old not in s:
-                  raise SystemExit('missing patch anchor: ' + repr(old[:120]))
+                  raise SystemExit('missing patch anchor: ' + repr(old))
               s = s.replace(old, new, 1)
+
+          def sub(pattern, replacement):
+              global s
+              s2, count = re.subn(pattern, replacement, s, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit('regex patch count=' + str(count) + ': ' + pattern)
+              s = s2
+
           rep("} from './types';\n", "} from './types';\nimport {\n  ROUTING_WS_CLIENT_KEYS,\n  parseGroupMessageFilter,\n  parseKeywordFilter,\n  parseMessagePrefix,\n  parsePrivateMessageFilter,\n  routingConfigToJson,\n  validateWsClientRouting,\n} from './routing-config';\n")
           rep(": ['url', 'role', 'reconnectIntervalMs'];", ": ['url', 'role', 'reconnectIntervalMs', ...ROUTING_WS_CLIENT_KEYS];")
-          old_restore = """    if (kind === 'wsClients' && raw.reconnectIntervalMs !== undefined) {
-              const interval = parseRestoreInteger(raw.reconnectIntervalMs);
-              if (interval === null || interval < 1000 || interval > NODE_TIMER_MAX_MS) {
-                invalid(`${pathAt}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`);
-              }
-            }
-          """
-          rep(old_restore, old_restore + """    if (kind === 'wsClients') {
-              const routingError = validateWsClientRouting(raw, pathAt);
-              if (routingError) invalid(routingError);
-            }
-          """)
-          old_assert = """    if (
-              item.reconnectIntervalMs !== undefined &&
-              (
-                typeof item.reconnectIntervalMs !== 'number' ||
-                !Number.isSafeInteger(item.reconnectIntervalMs) ||
-                item.reconnectIntervalMs < 1000 ||
-                item.reconnectIntervalMs > NODE_TIMER_MAX_MS
-              )
-            ) {
-              invalid(`${at}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`);
-            }
-          """
-          rep(old_assert, old_assert + """    const routingError = validateWsClientRouting(item, at);
-            if (routingError) invalid(routingError);
-          """)
-          rep("""      ? Math.max(1000, Math.trunc(n.reconnectIntervalMs))
-              : 5000;
-            return out;
-          }
-          """, """      ? Math.max(1000, Math.trunc(n.reconnectIntervalMs))
-              : 5000;
-            Object.assign(out, routingConfigToJson(n));
-            return out;
-          }
-          """)
-          rep("""    role: asRole(value.role, 'Universal'),
-              reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),
-            });
-          }
-          """, """    role: asRole(value.role, 'Universal'),
-              reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),
-              groupMessageFilter: parseGroupMessageFilter(value.groupMessageFilter),
-              privateMessageFilter: parsePrivateMessageFilter(value.privateMessageFilter),
-              keywordFilter: parseKeywordFilter(value.keywordFilter),
-              messagePrefix: parseMessagePrefix(value.messagePrefix),
-            });
-          }
-          """)
+
+          sub(
+              r"(if \(kind === 'wsClients' && raw\.reconnectIntervalMs !== undefined\) \{.*?invalid\(`\$\{pathAt\}\.reconnectIntervalMs must be an integer between 1000 and \$\{NODE_TIMER_MAX_MS\}`\);\s*\}\s*\})",
+              r"\1\n    if (kind === 'wsClients') {\n      const routingError = validateWsClientRouting(raw, pathAt);\n      if (routingError) invalid(routingError);\n    }",
+          )
+
+          sub(
+              r"(if \(\s*item\.reconnectIntervalMs !== undefined &&.*?invalid\(`\$\{at\}\.reconnectIntervalMs must be an integer between 1000 and \$\{NODE_TIMER_MAX_MS\}`\);\s*\})",
+              r"\1\n    const routingError = validateWsClientRouting(item, at);\n    if (routingError) invalid(routingError);",
+          )
+
+          rep(": 5000;\n  return out;\n}\n\nfunction fromJson", ": 5000;\n  Object.assign(out, routingConfigToJson(n));\n  return out;\n}\n\nfunction fromJson")
+          rep("    reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),\n  });\n}\n\nfunction hasLegacyTopLevel", "    reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),\n    groupMessageFilter: parseGroupMessageFilter(value.groupMessageFilter),\n    privateMessageFilter: parsePrivateMessageFilter(value.privateMessageFilter),\n    keywordFilter: parseKeywordFilter(value.keywordFilter),\n    messagePrefix: parseMessagePrefix(value.messagePrefix),\n  });\n}\n\nfunction hasLegacyTopLevel")
+
           p.write_text(s)
           PY
 
