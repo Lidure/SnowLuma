@@ -2,15 +2,14 @@ import { useState, type ReactNode } from 'react';
 import { DropdownSelect } from '@/components/ui/dropdown-select';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { MultiPicker } from '@/components/ui/multi-picker';
+import { MultiTagInput } from '@/components/ui/multi-tag-input';
 import { ToggleSwitch } from '@/components/ui/toggle-switch';
+import { useFriends, useGroups } from '@/hooks/use-debug-contacts';
 import type { WsClientNetwork } from '@/types';
 import {
-  formatGroupIdsInput,
-  formatKeywordPatternsInput,
-  formatUserIdsInput,
-  parseGroupIdsInput,
   parseKeywordPatternsInput,
-  parseUserIdsInput,
+  resolveSelectedOptions,
   type GroupMessageFilterConfig,
   type KeywordFilterConfig,
   type MessagePrefixConfig,
@@ -25,6 +24,7 @@ export type RoutingWsClientNetwork = WsClientNetwork & {
 };
 
 interface Props {
+  uin: string;
   value: RoutingWsClientNetwork;
   onChange: (changes: Partial<RoutingWsClientNetwork>) => void;
 }
@@ -50,18 +50,25 @@ function ErrorText({ text }: { text?: string }) {
   return text ? <p className="mt-1 text-xs text-destructive">{text}</p> : null;
 }
 
-export function WsClientRoutingFields({ value, onChange }: Props) {
-  const [groupIdsText, setGroupIdsText] = useState(formatGroupIdsInput(value.groupMessageFilter?.groupIds));
-  const [privateIdsText, setPrivateIdsText] = useState(formatUserIdsInput(value.privateMessageFilter?.userIds));
-  const [keywordText, setKeywordText] = useState(formatKeywordPatternsInput(value.keywordFilter?.patterns));
-  const [keywordGroupText, setKeywordGroupText] = useState(formatGroupIdsInput(value.keywordFilter?.groupIds));
-  const [prefixGroupText, setPrefixGroupText] = useState(formatGroupIdsInput(value.messagePrefix?.groupIds));
+function idsToStrings(ids: number[] | undefined): string[] {
+  return (ids ?? []).map(String);
+}
+
+function stringsToIds(values: string[]): number[] {
+  return values.map(Number).filter((value) => Number.isSafeInteger(value) && value > 0);
+}
+
+function isPositiveSafeInteger(raw: string): boolean {
+  if (!/^\d+$/.test(raw)) return false;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+export function WsClientRoutingFields({ uin, value, onChange }: Props) {
+  const groups = useGroups(uin);
+  const friends = useFriends(uin);
   const [keywordScopeEnabled, setKeywordScopeEnabled] = useState(value.keywordFilter?.groupIds !== undefined);
-  const [groupError, setGroupError] = useState<string>();
-  const [privateError, setPrivateError] = useState<string>();
   const [keywordError, setKeywordError] = useState<string>();
-  const [keywordGroupError, setKeywordGroupError] = useState<string>();
-  const [prefixGroupError, setPrefixGroupError] = useState<string>();
 
   const groupEnabled = !!value.groupMessageFilter;
   const privateEnabled = !!value.privateMessageFilter;
@@ -71,11 +78,37 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
   const prefixGroupsMissing = prefixEnabled && (value.messagePrefix?.groupIds.length ?? 0) === 0;
   const prefixMissing = prefixEnabled && !value.messagePrefix?.prefix.trim();
 
+  const groupFilterValues = idsToStrings(value.groupMessageFilter?.groupIds);
+  const privateFilterValues = idsToStrings(value.privateMessageFilter?.userIds);
+  const keywordGroupValues = idsToStrings(value.keywordFilter?.groupIds);
+  const prefixGroupValues = idsToStrings(value.messagePrefix?.groupIds);
+
+  const selectedGroupFilters = resolveSelectedOptions(groupFilterValues, groups.items, '未知群聊');
+  const selectedPrivateFilters = resolveSelectedOptions(privateFilterValues, friends.items, '未知好友');
+  const selectedKeywordGroups = resolveSelectedOptions(keywordGroupValues, groups.items, '未知群聊');
+  const selectedPrefixGroups = resolveSelectedOptions(prefixGroupValues, groups.items, '未知群聊');
+
+  const groupPickerCommon = {
+    options: groups.items,
+    loading: groups.loading,
+    error: groups.error,
+    onRefresh: groups.refresh,
+    validateRaw: isPositiveSafeInteger,
+  };
+
+  const friendPickerCommon = {
+    options: friends.items,
+    loading: friends.loading,
+    error: friends.error,
+    onRefresh: friends.refresh,
+    validateRaw: isPositiveSafeInteger,
+  };
+
   return (
     <section className="flex flex-col gap-1.5">
       <span className="px-1 text-xs font-medium text-muted-foreground">消息路由与过滤</span>
       <div className="flex flex-col gap-3">
-        <Card title="群聊过滤" desc="按群号决定该节点接收或屏蔽哪些群聊消息。">
+        <Card title="群聊过滤" desc="直接从 Bot 已加入的群聊中选择；列表暂不可用时也可手动输入群号。">
           <div className="flex items-center justify-between gap-4">
             <Label>启用</Label>
             <ToggleSwitch
@@ -93,24 +126,21 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
               options={[...MODE_OPTIONS]}
               onChange={(mode) => onChange({ groupMessageFilter: { ...value.groupMessageFilter!, mode } })}
             />
-            <div>
-              <Input
-                value={groupIdsText}
-                placeholder="群号，逗号或空格分隔"
-                onChange={(event) => {
-                  const text = event.target.value;
-                  setGroupIdsText(text);
-                  const parsed = parseGroupIdsInput(text);
-                  setGroupError(parsed.error);
-                  if (!parsed.error) onChange({ groupMessageFilter: { ...value.groupMessageFilter!, groupIds: parsed.groupIds } });
-                }}
-              />
-              <ErrorText text={groupError} />
-            </div>
+            <MultiPicker
+              {...groupPickerCommon}
+              values={groupFilterValues}
+              selectedOptions={selectedGroupFilters}
+              onChange={(values) => onChange({
+                groupMessageFilter: { ...value.groupMessageFilter!, groupIds: stringsToIds(values) },
+              })}
+              placeholder="搜索群名称 / 群号并添加…"
+              ariaLabel="选择群聊过滤群号"
+              emptyLabel="尚未选择群聊"
+            />
           </div>}
         </Card>
 
-        <Card title="私聊过滤" desc="按 QQ 号决定该节点接收或屏蔽哪些私聊消息。">
+        <Card title="私聊过滤" desc="直接从 Bot 好友列表中选择 QQ；列表暂不可用时也可手动输入 QQ 号。">
           <div className="flex items-center justify-between gap-4">
             <Label>启用</Label>
             <ToggleSwitch
@@ -128,30 +158,28 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
               options={[...MODE_OPTIONS]}
               onChange={(mode) => onChange({ privateMessageFilter: { ...value.privateMessageFilter!, mode } })}
             />
-            <div>
-              <Input
-                value={privateIdsText}
-                placeholder="QQ号，逗号或空格分隔"
-                onChange={(event) => {
-                  const text = event.target.value;
-                  setPrivateIdsText(text);
-                  const parsed = parseUserIdsInput(text);
-                  setPrivateError(parsed.error);
-                  if (!parsed.error) onChange({ privateMessageFilter: { ...value.privateMessageFilter!, userIds: parsed.userIds } });
-                }}
-              />
-              <ErrorText text={privateError} />
-            </div>
+            <MultiPicker
+              {...friendPickerCommon}
+              values={privateFilterValues}
+              selectedOptions={selectedPrivateFilters}
+              onChange={(values) => onChange({
+                privateMessageFilter: { ...value.privateMessageFilter!, userIds: stringsToIds(values) },
+              })}
+              placeholder="搜索好友昵称 / QQ号并添加…"
+              ariaLabel="选择私聊过滤QQ号"
+              emptyLabel="尚未选择好友"
+            />
           </div>}
         </Card>
 
-        <Card title="关键词过滤" desc="关键词规则可以应用到所有群聊，也可以只应用到指定群聊；私聊仍按关键词规则处理。">
+        <Card title="关键词过滤" desc="关键词用标签管理；规则可以应用到所有群聊，也可以只应用到从群列表中选择的群聊。私聊仍按关键词规则处理。">
           <div className="flex items-center justify-between gap-4">
             <Label>启用</Label>
             <ToggleSwitch
               value={keywordEnabled}
               onChange={(enabled) => {
                 if (!enabled) setKeywordScopeEnabled(false);
+                setKeywordError(undefined);
                 onChange({ keywordFilter: enabled ? { mode: 'blacklist', patterns: [], regex: false } : undefined });
               }}
               ariaLabel="启用关键词过滤"
@@ -170,7 +198,7 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
                 <ToggleSwitch
                   value={value.keywordFilter!.regex === true}
                   onChange={(regex) => {
-                    const parsed = parseKeywordPatternsInput(keywordText, regex);
+                    const parsed = parseKeywordPatternsInput(value.keywordFilter!.patterns.join('\n'), regex);
                     setKeywordError(parsed.error);
                     if (!parsed.error) onChange({ keywordFilter: { ...value.keywordFilter!, regex, patterns: parsed.patterns } });
                   }}
@@ -179,17 +207,24 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
               </label>
             </div>
             <div>
-              <textarea
-                className="min-h-24 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                value={keywordText}
-                placeholder={'每行一个关键词\n例如：广告\nspam'}
-                onChange={(event) => {
-                  const text = event.target.value;
-                  setKeywordText(text);
-                  const parsed = parseKeywordPatternsInput(text, value.keywordFilter!.regex === true);
-                  setKeywordError(parsed.error);
-                  if (!parsed.error) onChange({ keywordFilter: { ...value.keywordFilter!, patterns: parsed.patterns } });
+              <MultiTagInput
+                values={value.keywordFilter!.patterns}
+                onChange={(patterns) => {
+                  setKeywordError(undefined);
+                  onChange({ keywordFilter: { ...value.keywordFilter!, patterns } });
                 }}
+                placeholder="输入关键词后按 Enter 添加"
+                ariaLabel="添加关键词"
+                validateItem={(pattern) => {
+                  if (value.keywordFilter!.regex !== true) return undefined;
+                  try {
+                    new RegExp(pattern);
+                    return undefined;
+                  } catch {
+                    return `正则“${pattern}”无法编译`;
+                  }
+                }}
+                helperText="按 Enter 添加；粘贴多行可批量添加。逗号和空格会保留在关键词中。"
               />
               <ErrorText text={keywordError} />
             </div>
@@ -202,26 +237,24 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
                 value={keywordScopeEnabled}
                 onChange={(enabled) => {
                   setKeywordScopeEnabled(enabled);
-                  if (!enabled) setKeywordGroupError(undefined);
                   onChange({ keywordFilter: { ...value.keywordFilter!, groupIds: enabled ? [] : undefined } });
                 }}
                 ariaLabel="关键词仅应用于指定群聊"
               />
             </div>
             {keywordScopeEnabled && <div>
-              <Input
-                value={keywordGroupText}
-                placeholder="应用关键词规则的群号"
-                onChange={(event) => {
-                  const text = event.target.value;
-                  setKeywordGroupText(text);
-                  const parsed = parseGroupIdsInput(text);
-                  const missing = !parsed.error && parsed.groupIds.length === 0;
-                  setKeywordGroupError(parsed.error ?? (missing ? '启用指定群聊后至少填写一个群号' : undefined));
-                  if (!parsed.error) onChange({ keywordFilter: { ...value.keywordFilter!, groupIds: parsed.groupIds } });
-                }}
+              <MultiPicker
+                {...groupPickerCommon}
+                values={keywordGroupValues}
+                selectedOptions={selectedKeywordGroups}
+                onChange={(values) => onChange({
+                  keywordFilter: { ...value.keywordFilter!, groupIds: stringsToIds(values) },
+                })}
+                placeholder="搜索要应用关键词规则的群聊…"
+                ariaLabel="选择关键词适用群聊"
+                emptyLabel="尚未选择适用群聊"
               />
-              <ErrorText text={keywordGroupError ?? (keywordGroupsMissing ? '启用指定群聊后至少填写一个群号' : undefined)} />
+              <ErrorText text={keywordGroupsMissing ? '启用指定群聊后至少选择一个群聊' : undefined} />
             </div>}
           </div>}
         </Card>
@@ -231,10 +264,7 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
             <Label>启用</Label>
             <ToggleSwitch
               value={prefixEnabled}
-              onChange={(enabled) => {
-                setPrefixGroupError(enabled ? '启用前缀后至少填写一个群号' : undefined);
-                onChange({ messagePrefix: enabled ? { prefix: '/airi', groupIds: [] } : undefined });
-              }}
+              onChange={(enabled) => onChange({ messagePrefix: enabled ? { prefix: '/airi', groupIds: [] } : undefined })}
               ariaLabel="启用节点消息前缀"
             />
           </div>
@@ -251,20 +281,19 @@ export function WsClientRoutingFields({ value, onChange }: Props) {
             </div>
             <div>
               <Label>应用群聊</Label>
-              <Input
+              <MultiPicker
+                {...groupPickerCommon}
                 className="mt-1.5"
-                value={prefixGroupText}
-                placeholder="至少填写一个群号"
-                onChange={(event) => {
-                  const text = event.target.value;
-                  setPrefixGroupText(text);
-                  const parsed = parseGroupIdsInput(text);
-                  const missing = !parsed.error && parsed.groupIds.length === 0;
-                  setPrefixGroupError(parsed.error ?? (missing ? '启用前缀后至少填写一个群号' : undefined));
-                  if (!parsed.error) onChange({ messagePrefix: { ...value.messagePrefix!, groupIds: parsed.groupIds } });
-                }}
+                values={prefixGroupValues}
+                selectedOptions={selectedPrefixGroups}
+                onChange={(values) => onChange({
+                  messagePrefix: { ...value.messagePrefix!, groupIds: stringsToIds(values) },
+                })}
+                placeholder="搜索需要前缀的群聊…"
+                ariaLabel="选择前缀适用群聊"
+                emptyLabel="尚未选择适用群聊"
               />
-              <ErrorText text={prefixGroupError ?? (prefixGroupsMissing ? '启用前缀后至少填写一个群号' : undefined)} />
+              <ErrorText text={prefixGroupsMissing ? '启用前缀后至少选择一个群聊' : undefined} />
             </div>
           </div>}
         </Card>
