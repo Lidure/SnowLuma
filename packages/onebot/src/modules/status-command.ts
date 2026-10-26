@@ -56,6 +56,8 @@ export function statusCooldownElapsed(
 
 export interface StatusInfo {
     version: string;
+    /** Optional branding shown to users; does not alter the actual package version. */
+    edition?: string;
     platform: string;
     arch: string;
     uptimeMs: number;
@@ -65,7 +67,7 @@ export interface StatusInfo {
 export function buildStatusText(info: StatusInfo): string {
     return [
         'SnowLuma 状态',
-        `版本: ${info.version}`,
+        `版本: ${info.version}${info.edition ? ` · ${info.edition}` : ''}`,
         `平台: ${info.platform}-${info.arch}`,
         `运行时长: ${formatUptime(info.uptimeMs)}`,
     ].join('\n');

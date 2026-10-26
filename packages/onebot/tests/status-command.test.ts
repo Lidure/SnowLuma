@@ -93,6 +93,18 @@ describe('formatUptime', () => {
 });
 
 describe('buildStatusText', () => {
+    it('renders the custom edition beside the version without changing version metadata', () => {
+        const text = buildStatusText({
+            version: '2.2.0',
+            edition: '小浅子过滤版',
+            platform: 'linux',
+            arch: 'arm64',
+            uptimeMs: 10_000,
+        });
+        expect(text).toContain('版本: 2.2.0 · 小浅子过滤版');
+        expect(text).toContain('平台: linux-arm64');
+        expect(text).not.toContain('uin');
+    });
     it('renders version / platform / uptime, no leaked uin or topology', () => {
         const text = buildStatusText({
             version: '1.9.3-node',
