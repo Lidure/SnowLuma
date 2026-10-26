@@ -18,6 +18,16 @@ import type {
     WsServerNetwork,
 } from './types';
 
+import {
+  ROUTING_WS_CLIENT_KEYS,
+  parseGroupMessageFilter,
+  parseKeywordFilter,
+  parseMessagePrefix,
+  parsePrivateMessageFilter,
+  routingConfigToJson,
+  validateWsClientRouting,
+} from './routing-config';
+
 const log = createLogger('OneBot.Config');
 
 const CONFIG_DIR = 'config';
@@ -409,7 +419,7 @@ function validateRestoreAdapterArray(
             ? ['host', 'port', 'path']
             : kind === 'httpClients'
               ? ['url', 'timeoutMs']
-              : ['url', 'role', 'reconnectIntervalMs'];
+              : ['url', 'role', 'reconnectIntervalMs', ...ROUTING_WS_CLIENT_KEYS];
 
     if (kind === 'httpServers') {
         specific.push('enableWebSocket');
@@ -514,6 +524,10 @@ function validateRestoreAdapterArray(
                     `${pathAt}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`,
                 );
             }
+        }
+        if (kind === 'wsClients') {
+            const err = validateWsClientRouting(raw, pathAt);
+            if (err) invalid(err);
         }
     });
     return value.length;
@@ -696,6 +710,8 @@ export function assertValidOneBotConfig(value: unknown): asserts value is OneBot
                 `${at}.reconnectIntervalMs must be an integer between 1000 and ${NODE_TIMER_MAX_MS}`,
             );
         }
+        const err = validateWsClientRouting(item, at);
+        if (err) invalid(err);
     });
 
     if (!isObject(value.statusCommand)) {
@@ -1087,6 +1103,7 @@ function wsClientToJson(n: WsClientNetwork): JsonObject {
         typeof n.reconnectIntervalMs === 'number' && Number.isFinite(n.reconnectIntervalMs)
             ? Math.max(1000, Math.trunc(n.reconnectIntervalMs))
             : 5000;
+    Object.assign(out, routingConfigToJson(n));
     return out;
 }
 
@@ -1427,6 +1444,10 @@ function parseWsClient(value: JsonObject, defaults: AdapterDefaults): WsClientNe
         url,
         role: asRole(value.role, 'Universal'),
         reconnectIntervalMs: Math.max(1000, reconnectIntervalMs),
+        groupMessageFilter: parseGroupMessageFilter(value.groupMessageFilter),
+        privateMessageFilter: parsePrivateMessageFilter(value.privateMessageFilter),
+        keywordFilter: parseKeywordFilter(value.keywordFilter),
+        messagePrefix: parseMessagePrefix(value.messagePrefix),
     });
 }
 

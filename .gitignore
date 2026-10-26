@@ -21,3 +21,6 @@ logs/
 
 # test coverage output
 coverage/
+
+# Local ARM64 release artifacts
+release/

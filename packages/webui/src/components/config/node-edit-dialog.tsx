@@ -41,6 +41,7 @@ import type {
     WsServerNetwork,
 } from '@/types';
 import { generateAccessToken, NETWORK_TABS } from './defaults';
+import { WsClientRoutingFields } from './ws-client-routing-fields';
 
 type AnyAdapter<K extends NetworkKind> = OneBotNetworks[K][number];
 
@@ -261,6 +262,12 @@ export function NodeEditDialog<K extends NetworkKind>(props: NodeEditDialogProps
                             </SettingRow>
                         )}
 
+                        {kind === 'wsClients' && (
+                            <WsClientRoutingFields
+                                value={draft as WsClientNetwork}
+                                onChange={(changes) => patch(changes as Partial<AnyAdapter<K>>)}
+                            />
+                        )}
                         <SettingRow
                             label="上报自身消息"
                             desc="将机器人自己发送的消息也作为 message_sent 事件上报"
