@@ -611,7 +611,8 @@ export class OneBotInstance {
     private async replyStatus(isGroup: boolean, sessionId: number): Promise<void> {
         const text = buildStatusText({
             version: APP_VERSION,
-            edition: '小浅子过滤版',
+            displayVersion: 'Super Airi！小浅子过滤版',
+            displayUptime: '小浅子不想告诉你！',
             platform: process.platform,
             arch: process.arch,
             uptimeMs: this.ctx.getUptimeMs(),
