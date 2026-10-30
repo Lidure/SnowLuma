@@ -58,6 +58,10 @@ export interface StatusInfo {
     version: string;
     /** Optional branding shown to users; does not alter the actual package version. */
     edition?: string;
+    /** Text displayed in #sl instead of the actual package version. */
+    displayVersion?: string;
+    /** Text displayed in #sl instead of the measured uptime. */
+    displayUptime?: string;
     platform: string;
     arch: string;
     uptimeMs: number;
@@ -67,9 +71,9 @@ export interface StatusInfo {
 export function buildStatusText(info: StatusInfo): string {
     return [
         'SnowLuma 状态',
-        `版本: ${info.version}${info.edition ? ` · ${info.edition}` : ''}`,
-        `平台: ${info.platform}-${info.arch}`,
-        `运行时长: ${formatUptime(info.uptimeMs)}`,
+        `版本：${info.displayVersion ?? `${info.version}${info.edition ? ` · ${info.edition}` : ''}`}`,
+        `平台：${info.platform}-${info.arch}`,
+        `运行时长：${info.displayUptime ?? formatUptime(info.uptimeMs)}`,
     ].join('\n');
 }
 
