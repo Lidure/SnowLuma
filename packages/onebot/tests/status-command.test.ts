@@ -93,6 +93,22 @@ describe('formatUptime', () => {
 });
 
 describe('buildStatusText', () => {
+    it('uses the custom #sl display without exposing the actual uptime/version', () => {
+        const text = buildStatusText({
+            version: '2.2.0',
+            displayVersion: 'Super Airi！小浅子过滤版',
+            displayUptime: '小浅子不想告诉你！',
+            platform: 'linux',
+            arch: 'arm64',
+            uptimeMs: 90_000,
+        });
+        expect(text).toContain('版本：Super Airi！小浅子过滤版');
+        expect(text).toContain('运行时长：小浅子不想告诉你！');
+        expect(text).toContain('平台：linux-arm64');
+        expect(text).not.toContain('2.2.0');
+        expect(text).not.toContain('1分钟 30秒');
+    });
+
     it('renders the custom edition beside the version without changing version metadata', () => {
         const text = buildStatusText({
             version: '2.2.0',
@@ -101,8 +117,8 @@ describe('buildStatusText', () => {
             arch: 'arm64',
             uptimeMs: 10_000,
         });
-        expect(text).toContain('版本: 2.2.0 · 小浅子过滤版');
-        expect(text).toContain('平台: linux-arm64');
+        expect(text).toContain('版本：2.2.0 · 小浅子过滤版');
+        expect(text).toContain('平台：linux-arm64');
         expect(text).not.toContain('uin');
     });
     it('renders version / platform / uptime, no leaked uin or topology', () => {
@@ -113,9 +129,9 @@ describe('buildStatusText', () => {
             uptimeMs: 90_000,
         });
         expect(text).toContain('SnowLuma');
-        expect(text).toContain('版本: 1.9.3-node');
-        expect(text).toContain('平台: linux-x64');
-        expect(text).toContain('运行时长: 1分钟 30秒');
+        expect(text).toContain('版本：1.9.3-node');
+        expect(text).toContain('平台：linux-x64');
+        expect(text).toContain('运行时长：1分钟 30秒');
         // public-safe: must not echo a uin or connection count
         expect(text).not.toMatch(/uin|连接|adapter/i);
     });
